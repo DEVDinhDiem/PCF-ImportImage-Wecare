@@ -6,6 +6,7 @@ interface DataverseImageRecord {
     crdfd_notes?: string;
     crdfd_image?: string;
     crdfd_key_data?: string;
+    crdfd_table?: string;
 }
 
 export class ImportFile implements ComponentFramework.StandardControl<IInputs, IOutputs> {
@@ -22,6 +23,7 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
     private _imagesCount = 0;
     private _keyDataValue = "";
     private _existingImages: DataverseImageRecord[] = [];
+    private _tableName = ""; // Store table name for crdfd_table field
 
     /**
      * Empty constructor.
@@ -67,6 +69,10 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
             // If key data changed, reload images
             if (this._keyDataValue !== newKeyDataValue) {
                 this._keyDataValue = newKeyDataValue;
+                
+                // Try to extract table name from entity metadata or context
+                this._tableName = this.getTableNameFromContext(context);
+                
                 this.loadExistingImages();
             }
         }
@@ -305,7 +311,7 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
         // Create preview for each image
         this._selectedImages.forEach((file, index) => {
             const imageItem = document.createElement('div');
-            imageItem.className = 'image-item';
+            imageItem.className = 'image-item new-image';
             imageItem.innerHTML = `
                 <img src="" alt="Preview" class="image-preview">
                 <div class="image-info">
@@ -389,16 +395,58 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
     /**
      * Clears all selected images
      */
-    private clearAllImages(): void {
-        this._selectedImages = [];
-        this._imageNotes = [];
-        this._fileName = "";
-        this._fileContent = "";
-        this._imagesList = "";
-        this._imagesCount = 0;
-        this.updateImageDisplay();
-        this._notifyOutputChanged();
-        this.updateStatus('Đã xóa tất cả hình ảnh', 'info');
+    private async clearAllImages(): Promise<void> {
+        const hasNewImages = this._selectedImages.length > 0;
+        const hasExistingImages = this._existingImages.length > 0;
+        
+        let confirmMessage = '';
+        if (hasNewImages && hasExistingImages) {
+            confirmMessage = `Bạn có chắc muốn xóa tất cả ${this._selectedImages.length} hình ảnh chưa lưu và ${this._existingImages.length} hình ảnh đã lưu trong Dataverse?`;
+        } else if (hasNewImages) {
+            confirmMessage = `Bạn có chắc muốn xóa tất cả ${this._selectedImages.length} hình ảnh chưa lưu?`;
+        } else if (hasExistingImages) {
+            confirmMessage = `Bạn có chắc muốn xóa tất cả ${this._existingImages.length} hình ảnh đã lưu trong Dataverse?`;
+        } else {
+            this.updateStatus('Không có hình ảnh nào để xóa', 'info');
+            return;
+        }
+
+        if (!confirm(confirmMessage)) {
+            return;
+        }
+
+        try {
+            this.updateStatus('Đang xóa tất cả hình ảnh...', 'info');
+
+            // Delete all existing images from Dataverse
+            if (hasExistingImages) {
+                for (const image of this._existingImages) {
+                    await this._context.webAPI.deleteRecord("crdfd_multiimages", image.crdfd_multiimagesid);
+                }
+            }
+
+            // Clear local arrays
+            this._selectedImages = [];
+            this._imageNotes = [];
+            this._existingImages = [];
+            this._fileName = "";
+            this._fileContent = "";
+            this._imagesList = "";
+            this._imagesCount = 0;
+            
+            // Hide preview container
+            const previewContainer = this._container.querySelector('#previewContainer') as HTMLDivElement;
+            previewContainer.classList.add('hidden');
+            
+            this._notifyOutputChanged();
+            
+            const deletedCount = (hasNewImages ? this._selectedImages.length : 0) + (hasExistingImages ? this._existingImages.length : 0);
+            this.updateStatus(`Đã xóa thành công tất cả hình ảnh`, 'success');
+
+        } catch (error) {
+            console.error("Error clearing all images:", error);
+            this.updateStatus('Lỗi khi xóa hình ảnh', 'error');
+        }
     }
 
     /**
@@ -518,7 +566,7 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
             this.updateStatus('Đang tải hình ảnh có sẵn...', 'info');
             
             // Query crdfd_multiimages table
-            const query = `?$filter=crdfd_key_data eq '${this._keyDataValue}'&$select=crdfd_multiimagesid,crdfd_image_name,crdfd_notes,crdfd_image`;
+            const query = `?$filter=crdfd_key_data eq '${this._keyDataValue}'&$select=crdfd_multiimagesid,crdfd_image_name,crdfd_notes,crdfd_image,crdfd_table`;
             
             const result = await this._context.webAPI.retrieveMultipleRecords("crdfd_multiimages", query);
             
@@ -544,14 +592,18 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
         const imageGrid = this._container.querySelector('#imageGrid') as HTMLDivElement;
         const imageCount = this._container.querySelector('#imageCount') as HTMLSpanElement;
 
-        // Update count
-        imageCount.textContent = `${this._imagesCount} hình ảnh`;
+        // Calculate total count
+        const totalCount = this._existingImages.length + this._selectedImages.length;
+        this._imagesCount = totalCount;
 
-        if (this._imagesCount === 0) {
+        // Update count display
+        if (totalCount === 0) {
+            imageCount.textContent = `0 hình ảnh`;
             previewContainer.classList.add('hidden');
             return;
         }
 
+        imageCount.textContent = `${totalCount} hình ảnh (${this._existingImages.length} đã lưu, ${this._selectedImages.length} mới)`;
         previewContainer.classList.remove('hidden');
         imageGrid.innerHTML = '';
 
@@ -574,6 +626,14 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
                 const imgElement = imageItem.querySelector('.image-preview') as HTMLImageElement;
                 // For Dataverse images, we might need to make another call or use the image data directly
                 this.loadDataverseImage(record.crdfd_multiimagesid, imgElement);
+                
+                // Add click handler to open full size image
+                imgElement.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.openImagePreview(record.crdfd_multiimagesid);
+                });
+                imgElement.style.cursor = 'pointer';
+                imgElement.title = 'Click để xem ảnh full size';
             }
 
             // Add remove button event listener for existing image
@@ -606,13 +666,8 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
      */
     private displayNewImages(): void {
         const imageGrid = this._container.querySelector('#imageGrid') as HTMLDivElement;
-        const imageCount = this._container.querySelector('#imageCount') as HTMLSpanElement;
         
-        // Update total count
-        const totalCount = this._existingImages.length + this._selectedImages.length;
-        imageCount.textContent = `${totalCount} hình ảnh (${this._existingImages.length} đã lưu, ${this._selectedImages.length} mới)`;
-
-        // Add new images to grid
+        // Add new images to grid (count already updated in displayExistingImages)
         this._selectedImages.forEach((file, index) => {
             const imageItem = document.createElement('div');
             imageItem.className = 'image-item new-image';
@@ -716,6 +771,7 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
                 crdfd_image_name: fileName,
                 crdfd_notes: note,
                 crdfd_key_data: this._keyDataValue,
+                crdfd_table: this._tableName,
                 crdfd_image: base64String.split(',')[1] // Remove data:image prefix
             };
 
@@ -793,8 +849,79 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
     private removeNewImage(index: number): void {
         this._selectedImages.splice(index, 1);
         this._imageNotes.splice(index, 1);
-        this.displayExistingImages();
+        
+        // Refresh display
+        if (this._existingImages.length > 0 || this._keyDataValue) {
+            this.displayExistingImages();
+        } else {
+            this.updateImageDisplay();
+        }
+        
         this.updateStatus('Đã xóa hình ảnh chưa lưu', 'info');
+    }
+
+    /**
+     * Opens image preview in new window
+     */
+    private openImagePreview(imageId: string): void {
+        // Get the base URL from context or construct it
+        // Default to wecare-ii environment, but should be dynamic based on context
+        const baseUrl = this.getEnvironmentBaseUrl();
+        const timestamp = Date.now();
+        
+        // Construct the image download URL
+        const imageUrl = `${baseUrl}/Image/download.aspx?Entity=crdfd_multiimages&Attribute=crdfd_image&Id=${imageId}&Timestamp=${timestamp}&Full=true`;
+        
+        // Open in new window/tab
+        window.open(imageUrl, '_blank', 'noopener,noreferrer');
+    }
+
+    /**
+     * Gets table name from context
+     */
+    private getTableNameFromContext(context: ComponentFramework.Context<IInputs>): string {
+        try {
+            // Try to extract from URL
+            if (typeof window !== 'undefined' && window.location && window.location.href) {
+                const url = window.location.href;
+                // Pattern to match entity name in Dynamics URL
+                const match = url.match(/etn=([^&]+)/);
+                if (match && match[1]) {
+                    return match[1];
+                }
+                
+                // Alternative pattern for different URL formats
+                const pathMatch = url.match(/\/main\.aspx.*[?&]etn=([^&]+)/);
+                if (pathMatch && pathMatch[1]) {
+                    return pathMatch[1];
+                }
+            }
+            
+            // Default fallback
+            return 'unknown_table';
+        } catch (error) {
+            console.warn('Could not determine table name:', error);
+            return 'unknown_table';
+        }
+    }
+
+    /**
+     * Gets the environment base URL
+     */
+    private getEnvironmentBaseUrl(): string {
+        try {
+            // Fallback: extract from current window location
+            if (typeof window !== 'undefined' && window.location) {
+                const { protocol, hostname } = window.location;
+                return `${protocol}//${hostname}`;
+            }
+            
+            // Default fallback
+            return 'https://wecare-ii.crm5.dynamics.com';
+        } catch (error) {
+            console.warn('Could not determine base URL, using default:', error);
+            return 'https://wecare-ii.crm5.dynamics.com';
+        }
     }
 
     /**
@@ -820,8 +947,44 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
 
         this.updateStatus(`Đang lưu ${this._selectedImages.length} hình ảnh...`, 'info');
 
-        for (let i = 0; i < this._selectedImages.length; i++) {
-            await this.saveImageToDataverse(i);
+        try {
+            // Save all images sequentially
+            const imagesToSave = [...this._selectedImages]; // Create a copy to avoid array mutation issues
+            
+            for (let i = 0; i < imagesToSave.length; i++) {
+                const file = imagesToSave[i];
+                const note = this.getImageNote(i);
+                const fileName = file.name || `Image_${Date.now()}_${i}.${this.getImageExtension(file.type)}`;
+
+                // Convert image to base64
+                const base64String = await this.fileToBase64(file);
+
+                // Create record in crdfd_multiimages
+                const record = {
+                    crdfd_image_name: fileName,
+                    crdfd_notes: note,
+                    crdfd_key_data: this._keyDataValue,
+                    crdfd_table: this._tableName,
+                    crdfd_image: base64String.split(',')[1] // Remove data:image prefix
+                };
+
+                await this._context.webAPI.createRecord("crdfd_multiimages", record);
+                
+                this.updateStatus(`Đã lưu ${i + 1}/${imagesToSave.length} hình ảnh...`, 'info');
+            }
+
+            // Clear selected images and notes after successful save
+            this._selectedImages = [];
+            this._imageNotes = [];
+
+            // Reload existing images
+            await this.loadExistingImages();
+
+            this.updateStatus(`Đã lưu thành công ${imagesToSave.length} hình ảnh`, 'success');
+
+        } catch (error) {
+            console.error("Error saving all images:", error);
+            this.updateStatus('Lỗi khi lưu hình ảnh', 'error');
         }
     }
 }
