@@ -633,7 +633,13 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
                     this.openImagePreview(record.crdfd_multiimagesid);
                 });
                 imgElement.style.cursor = 'pointer';
-                imgElement.title = 'Click để xem ảnh full size';
+                
+                // Set appropriate title based on environment
+                if (this.isMobileEnvironment()) {
+                    imgElement.title = 'Chạm để xem ảnh full size';
+                } else {
+                    imgElement.title = 'Click để xem ảnh full size';
+                }
             }
 
             // Add remove button event listener for existing image
@@ -864,16 +870,276 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
      * Opens image preview in new window
      */
     private openImagePreview(imageId: string): void {
-        // Get the base URL from context or construct it
-        // Default to wecare-ii environment, but should be dynamic based on context
-        const baseUrl = this.getEnvironmentBaseUrl();
-        const timestamp = Date.now();
+        // Check if running in mobile environment
+        if (this.isMobileEnvironment()) {
+            // For mobile, create an overlay modal to display the image
+            this.showImageModal(imageId);
+        } else {
+            // For web, use the original method
+            const baseUrl = this.getEnvironmentBaseUrl();
+            const timestamp = Date.now();
+            
+            // Construct the image download URL
+            const imageUrl = `${baseUrl}/Image/download.aspx?Entity=crdfd_multiimages&Attribute=crdfd_image&Id=${imageId}&Timestamp=${timestamp}&Full=true`;
+            
+            // Open in new window/tab
+            window.open(imageUrl, '_blank', 'noopener,noreferrer');
+        }
+    }
+
+    /**
+     * Check if running in mobile environment
+     */
+    private isMobileEnvironment(): boolean {
+        try {
+            // Check if it's Power Apps mobile
+            if (typeof window !== 'undefined') {
+                const userAgent = window.navigator.userAgent.toLowerCase();
+                
+                // Check for Power Apps mobile indicators
+                if (userAgent.includes('powerapps') || 
+                    userAgent.includes('mobile') ||
+                    /android|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent)) {
+                    return true;
+                }
+                
+                // Check for small screen size (mobile indicator)
+                if (window.innerWidth <= 768) {
+                    return true;
+                }
+                
+                // Check for touch device
+                if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
+                    return true;
+                }
+                
+                // Check for Power Apps specific context
+                if (window.location && window.location.href.includes('apps.powerapps.com')) {
+                    return true;
+                }
+            }
+            
+            return false;
+        } catch (error) {
+            console.warn('Could not determine mobile environment:', error);
+            // Default to mobile-friendly approach if cannot determine
+            return true;
+        }
+    }
+
+    /**
+     * Show image in modal overlay for mobile
+     */
+    private async showImageModal(imageId: string): Promise<void> {
+        try {
+            // Remove any existing modal
+            this.removeImageModal();
+            
+            this.updateStatus('Đang chuẩn bị hiển thị ảnh...', 'info');
+            
+            // Get only the image name for the modal title
+            const response = await this._context.webAPI.retrieveRecord("crdfd_multiimages", imageId, "?$select=crdfd_image_name,crdfd_image");
+            
+            // Construct the full size image URL for display and download
+            const baseUrl = this.getEnvironmentBaseUrl();
+            const timestamp = Date.now();
+            const fullImageUrl = `${baseUrl}/Image/download.aspx?Entity=crdfd_multiimages&Attribute=crdfd_image&Id=${imageId}&Timestamp=${timestamp}&Full=true`;
+
+            // Create modal overlay
+            const modalOverlay = document.createElement('div');
+            modalOverlay.id = 'imageModal';
+            modalOverlay.className = 'image-modal-overlay';
+
+            modalOverlay.innerHTML = `
+                <div class="image-modal-content">
+                    <div class="image-modal-header">
+                        <span class="image-modal-title">${response.crdfd_image_name || 'Hình ảnh'}</span>
+                        <button class="image-modal-close">×</button>
+                    </div>
+                    <div class="image-modal-body">
+                        <img src="${fullImageUrl}" alt="Full size image" class="image-modal-img" crossorigin="anonymous">
+                        <div class="image-loading">Đang tải ảnh full size...</div>
+                    </div>
+                    <div class="image-modal-footer">
+                        <button class="image-modal-download">📥 Tải về</button>
+                        <button class="image-modal-close-btn">Đóng</button>
+                    </div>
+                </div>
+            `;
+            
+            // Add to document
+            document.body.appendChild(modalOverlay);
+            
+            // Add event listeners
+            const closeBtn = modalOverlay.querySelector('.image-modal-close') as HTMLButtonElement;
+            const closeBtnFooter = modalOverlay.querySelector('.image-modal-close-btn') as HTMLButtonElement;
+            const downloadBtn = modalOverlay.querySelector('.image-modal-download') as HTMLButtonElement;
+            const img = modalOverlay.querySelector('.image-modal-img') as HTMLImageElement;
+            const loadingDiv = modalOverlay.querySelector('.image-loading') as HTMLDivElement;
+            
+            // Close modal handlers
+            const closeModal = () => {
+                this.removeImageModal();
+            };
+            
+            closeBtn.addEventListener('click', closeModal);
+            closeBtnFooter.addEventListener('click', closeModal);
+            
+            // Close when clicking outside
+            modalOverlay.addEventListener('click', (e) => {
+                if (e.target === modalOverlay) {
+                    closeModal();
+                }
+            });
+            
+            // Image load handlers
+            img.addEventListener('load', () => {
+                loadingDiv.style.display = 'none';
+                img.style.display = 'block';
+                if (this.isMobileEnvironment()) {
+                    this.updateStatus('Ảnh full size đã tải. Pinch để zoom, double-tap để reset', 'success');
+                } else {
+                    this.updateStatus('Ảnh full size đã được tải', 'success');
+                }
+            });
+            
+            img.addEventListener('error', () => {
+                loadingDiv.textContent = 'Không thể tải ảnh full size. Đang hiển thị ảnh preview...';
+                // Fallback to base64 if web link fails and we have it
+                if (response.crdfd_image) {
+                    img.src = `data:image/png;base64,${response.crdfd_image}`;
+                    img.style.display = 'block';
+                    loadingDiv.style.display = 'none';
+                    this.updateStatus('Hiển thị ảnh preview', 'info');
+                } else {
+                    this.updateStatus('Không thể tải ảnh', 'error');
+                }
+            });
+            
+            // Download handler - use the full size web URL
+            downloadBtn.addEventListener('click', () => {
+                this.downloadImageFromUrl(fullImageUrl, response.crdfd_image_name || 'image.png');
+            });
+            
+            // Pinch to zoom support for mobile
+            this.addPinchToZoom(img);
+            
+            this.updateStatus('Ảnh đã được hiển thị', 'success');
+            
+        } catch (error) {
+            console.error('Error showing image modal:', error);
+            this.updateStatus('Lỗi khi hiển thị ảnh', 'error');
+        }
+    }
+
+    /**
+     * Remove image modal
+     */
+    private removeImageModal(): void {
+        const existingModal = document.getElementById('imageModal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+    }
+
+    /**
+     * Download image from URL (for full size images)
+     */
+    private downloadImageFromUrl(imageUrl: string, fileName: string): void {
+        try {
+            if (this.isMobileEnvironment()) {
+                // For mobile, open in new tab/window - the browser will handle download
+                window.open(imageUrl, '_blank', 'noopener,noreferrer');
+                this.updateStatus('Đã mở ảnh full size trong tab mới', 'success');
+            } else {
+                // For desktop, create download link
+                const link = document.createElement('a');
+                link.href = imageUrl;
+                link.download = fileName;
+                link.target = '_blank';
+                
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                this.updateStatus('Đang tải ảnh full size...', 'success');
+            }
+        } catch (error) {
+            console.error('Error downloading image:', error);
+            this.updateStatus('Lỗi khi tải ảnh', 'error');
+        }
+    }
+
+    /**
+     * Download image from base64 data (fallback method)
+     */
+    private downloadImageFromBase64(base64Data: string, fileName: string): void {
+        try {
+            // Create download link
+            const link = document.createElement('a');
+            link.href = `data:image/png;base64,${base64Data}`;
+            link.download = fileName;
+            
+            // Trigger download
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            this.updateStatus('Đã tải ảnh xuống (preview size)', 'success');
+        } catch (error) {
+            console.error('Error downloading image:', error);
+            this.updateStatus('Lỗi khi tải ảnh', 'error');
+        }
+    }
+
+    /**
+     * Add pinch to zoom functionality for mobile
+     */
+    private addPinchToZoom(imgElement: HTMLImageElement): void {
+        let scale = 1;
+        let startDistance = 0;
+        let initialScale = 1;
         
-        // Construct the image download URL
-        const imageUrl = `${baseUrl}/Image/download.aspx?Entity=crdfd_multiimages&Attribute=crdfd_image&Id=${imageId}&Timestamp=${timestamp}&Full=true`;
+        imgElement.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                startDistance = this.getDistance(e.touches[0], e.touches[1]);
+                initialScale = scale;
+            }
+        });
         
-        // Open in new window/tab
-        window.open(imageUrl, '_blank', 'noopener,noreferrer');
+        imgElement.addEventListener('touchmove', (e) => {
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                const currentDistance = this.getDistance(e.touches[0], e.touches[1]);
+                const scaleChange = currentDistance / startDistance;
+                scale = Math.min(Math.max(0.5, initialScale * scaleChange), 3);
+                
+                imgElement.style.transform = `scale(${scale})`;
+            }
+        });
+        
+        // Double tap to reset zoom
+        let lastTouchEnd = 0;
+        imgElement.addEventListener('touchend', (e) => {
+            const now = Date.now();
+            if (now - lastTouchEnd <= 300) {
+                e.preventDefault();
+                // Double tap - reset zoom
+                scale = 1;
+                imgElement.style.transform = 'scale(1)';
+            }
+            lastTouchEnd = now;
+        });
+    }
+
+    /**
+     * Get distance between two touch points
+     */
+    private getDistance(touch1: Touch, touch2: Touch): number {
+        const dx = touch1.clientX - touch2.clientX;
+        const dy = touch1.clientY - touch2.clientY;
+        return Math.sqrt(dx * dx + dy * dy);
     }
 
     /**
