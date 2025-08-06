@@ -1114,7 +1114,7 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
     }
 
     /**
-     * Add pinch to zoom functionality for mobile with smart zoom levels
+     * Add pinch to zoom functionality for mobile with smooth zoom levels
      */
     private addPinchToZoom(imgElement: HTMLImageElement): void {
         let scale = 1;
@@ -1126,9 +1126,6 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
         let lastTouchY = 0;
         let isPanning = false;
         let isZooming = false;
-        
-        // Predefined smart zoom levels for mobile
-        const ZOOM_LEVELS = [0.3, 0.5, 1.0, 1.5, 2.0, 3.0];
         
         // Get initial scale from the element (from autoFit)
         const computedStyle = window.getComputedStyle(imgElement);
@@ -1167,26 +1164,77 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             e.preventDefault();
             
             if (e.touches.length === 2 && isZooming) {
-                // Pinch zoom with smooth scaling
+                // Pinch zoom with smooth scaling and zoom-to-center-of-fingers
                 const currentDistance = this.getDistance(e.touches[0], e.touches[1]);
                 const scaleChange = currentDistance / startDistance;
                 const newScale = initialScale * scaleChange;
                 
-                // Smooth zoom bounds - allow more granular control
-                scale = Math.min(Math.max(0.2, newScale), 4);
+                // Calculate center point between fingers
+                const touch1 = e.touches[0];
+                const touch2 = e.touches[1];
+                const centerX = (touch1.clientX + touch2.clientX) / 2;
+                const centerY = (touch1.clientY + touch2.clientY) / 2;
+                
+                // Get center relative to image
+                const rect = imgElement.getBoundingClientRect();
+                const imageCenterX = rect.left + rect.width / 2;
+                const imageCenterY = rect.top + rect.height / 2;
+                const offsetX = centerX - imageCenterX;
+                const offsetY = centerY - imageCenterY;
+                
+                // Apply zoom bounds
+                const oldScale = scale;
+                scale = Math.min(Math.max(1.0, newScale), 4.0); // Giới hạn từ 100% đến 400%
+                const actualScaleChange = scale / oldScale;
+                
+                // Adjust translation to zoom towards finger center
+                if (actualScaleChange !== 1) {
+                    const zoomOffsetX = offsetX * (actualScaleChange - 1) * 0.5; // Reduce intensity for touch
+                    const zoomOffsetY = offsetY * (actualScaleChange - 1) * 0.5;
+                    
+                    translateX = (translateX - zoomOffsetX) * actualScaleChange;
+                    translateY = (translateY - zoomOffsetY) * actualScaleChange;
+                    
+                    // Apply bounds
+                    const maxTranslateX = Math.max(0, (scale - 0.2) * imgElement.clientWidth / 2);
+                    const maxTranslateY = Math.max(0, (scale - 0.2) * imgElement.clientHeight / 2);
+                    
+                    translateX = Math.min(Math.max(translateX, -maxTranslateX), maxTranslateX);
+                    translateY = Math.min(Math.max(translateY, -maxTranslateY), maxTranslateY);
+                }
                 
                 this.updateImageTransform(imgElement, scale, translateX, translateY);
             } else if (e.touches.length === 1 && isPanning && !isZooming) {
-                // Pan image - allow at any zoom level
+                // Pan image - allow at any zoom level with improved sensitivity and edge resistance
                 const deltaX = e.touches[0].clientX - lastTouchX;
                 const deltaY = e.touches[0].clientY - lastTouchY;
                 
-                // More generous pan bounds
-                const maxTranslateX = Math.max(0, (scale - 0.3) * imgElement.clientWidth / 2);
-                const maxTranslateY = Math.max(0, (scale - 0.3) * imgElement.clientHeight / 2);
+                // More generous and responsive pan bounds with edge resistance
+                const maxTranslateX = Math.max(0, (scale - 0.8) * imgElement.clientWidth / 2);
+                const maxTranslateY = Math.max(0, (scale - 0.8) * imgElement.clientHeight / 2);
                 
-                translateX = Math.min(Math.max(translateX + deltaX, -maxTranslateX), maxTranslateX);
-                translateY = Math.min(Math.max(translateY + deltaY, -maxTranslateY), maxTranslateY);
+                let newTranslateX = translateX + deltaX;
+                let newTranslateY = translateY + deltaY;
+                
+                // Add edge resistance when near boundaries
+                if (newTranslateX > maxTranslateX) {
+                    const overshoot = newTranslateX - maxTranslateX;
+                    newTranslateX = maxTranslateX + overshoot * 0.3; // Resistance factor
+                } else if (newTranslateX < -maxTranslateX) {
+                    const overshoot = -maxTranslateX - newTranslateX;
+                    newTranslateX = -maxTranslateX - overshoot * 0.3;
+                }
+                
+                if (newTranslateY > maxTranslateY) {
+                    const overshoot = newTranslateY - maxTranslateY;
+                    newTranslateY = maxTranslateY + overshoot * 0.3;
+                } else if (newTranslateY < -maxTranslateY) {
+                    const overshoot = -maxTranslateY - newTranslateY;
+                    newTranslateY = -maxTranslateY - overshoot * 0.3;
+                }
+                
+                translateX = newTranslateX;
+                translateY = newTranslateY;
                 
                 this.updateImageTransform(imgElement, scale, translateX, translateY);
                 
@@ -1195,7 +1243,7 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             }
         });
         
-        // Smart double tap with predefined zoom levels
+        // Smooth double tap with continuous zoom
         let lastTouchEnd = 0;
         let tapTimeout: NodeJS.Timeout | null = null;
         
@@ -1203,11 +1251,6 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             e.preventDefault();
             isPanning = false;
             isZooming = false;
-            
-            // Re-enable smooth transition after touch ends
-            setTimeout(() => {
-                imgElement.style.transition = 'transform 0.3s ease-out';
-            }, 100);
             
             const now = Date.now();
             
@@ -1217,19 +1260,23 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             }
             
             if (now - lastTouchEnd <= 300) {
-                // Smart double tap cycling through zoom levels
-                const currentIndex = this.getClosestZoomIndex(scale);
-                let nextIndex = currentIndex + 1;
-                
-                // Cycle back to start if at end
-                if (nextIndex >= ZOOM_LEVELS.length) {
-                    nextIndex = 0;
+                // Smooth double tap - cycle through useful zoom levels
+                if (scale < 1.2) {
+                    // If at base zoom, go to 1.5x
+                    scale = 1.5;
+                } else if (scale < 2.0) {
+                    // If at 1.5x, go to 2x
+                    scale = 2.0;
+                } else if (scale < 3.0) {
+                    // If at 2x, go to 3x
+                    scale = 3.0;
+                } else {
+                    // If zoomed in, reset to base
+                    scale = 1.0;
                 }
                 
-                scale = ZOOM_LEVELS[nextIndex];
-                
-                // Reset position for extreme zoom levels
-                if (scale <= 0.5 || scale >= 2) {
+                // Reset position for high zoom levels
+                if (scale >= 3.0) {
                     translateX = 0;
                     translateY = 0;
                 }
@@ -1237,6 +1284,9 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
                 imgElement.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
                 this.updateImageTransform(imgElement, scale, translateX, translateY);
             } else {
+                // Single tap or end of gesture - snap back to bounds if needed
+                this.snapToBounds(imgElement, scale);
+                
                 // Single tap - set timeout to handle it if no second tap comes
                 tapTimeout = setTimeout(() => {
                     tapTimeout = null;
@@ -1246,26 +1296,49 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             lastTouchEnd = now;
         });
         
-        // Handle gestures ending
+        // Handle gestures ending with snap to bounds
         imgElement.addEventListener('touchcancel', (e) => {
             e.preventDefault();
             isPanning = false;
             isZooming = false;
-            imgElement.style.transition = 'transform 0.3s ease-out';
+            this.snapToBounds(imgElement, scale);
         });
         
-        // Enhanced wheel zoom for desktop - smooth zoom without snapping
+        // Enhanced wheel zoom for desktop - smooth zoom to cursor position
         imgElement.addEventListener('wheel', (e) => {
             e.preventDefault();
             
-            const delta = e.deltaY > 0 ? -0.15 : 0.15;
+            // Get cursor position relative to image
+            const rect = imgElement.getBoundingClientRect();
+            const cursorX = e.clientX - rect.left - rect.width / 2;
+            const cursorY = e.clientY - rect.top - rect.height / 2;
+            
+            // Calculate zoom
+            const zoomSensitivity = 0.1;
+            const delta = e.deltaY > 0 ? -zoomSensitivity : zoomSensitivity;
+            const oldScale = scale;
             const newScale = scale + delta;
             
-            // Smooth zoom without snapping - allow free zoom between bounds
-            scale = Math.min(Math.max(0.2, newScale), 4);
+            // Apply zoom bounds
+            scale = Math.min(Math.max(1.0, newScale), 4.0); // Giới hạn từ 100% đến 400%
+            const scaleChange = scale / oldScale;
             
-            // Reset position for very small or large scales
-            if (scale <= 0.5 || scale >= 3) {
+            // Adjust translation to zoom towards cursor position
+            const zoomOffsetX = cursorX * (scaleChange - 1);
+            const zoomOffsetY = cursorY * (scaleChange - 1);
+            
+            translateX = (translateX - zoomOffsetX) * scaleChange;
+            translateY = (translateY - zoomOffsetY) * scaleChange;
+            
+            // Apply bounds to prevent panning too far
+            const maxTranslateX = Math.max(0, (scale - 0.8) * imgElement.clientWidth / 2);
+            const maxTranslateY = Math.max(0, (scale - 0.8) * imgElement.clientHeight / 2);
+            
+            translateX = Math.min(Math.max(translateX, -maxTranslateX), maxTranslateX);
+            translateY = Math.min(Math.max(translateY, -maxTranslateY), maxTranslateY);
+            
+            // Only reset position for very high zoom
+            if (scale >= 3.5) {
                 translateX = 0;
                 translateY = 0;
             }
@@ -1273,10 +1346,14 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             this.updateImageTransform(imgElement, scale, translateX, translateY);
         });
         
-        // Enhanced mouse drag support for desktop
+        // Enhanced mouse drag support with momentum and corner detection
         let isMouseDragging = false;
         let lastMouseX = 0;
         let lastMouseY = 0;
+        let dragStartTime = 0;
+        let dragVelocityX = 0;
+        let dragVelocityY = 0;
+        let lastDragTime = 0;
         
         imgElement.addEventListener('mousedown', (e) => {
             // Allow panning at any scale level
@@ -1284,6 +1361,10 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             isMouseDragging = true;
             lastMouseX = e.clientX;
             lastMouseY = e.clientY;
+            dragStartTime = Date.now();
+            lastDragTime = dragStartTime;
+            dragVelocityX = 0;
+            dragVelocityY = 0;
             imgElement.style.cursor = 'grabbing';
             imgElement.style.transition = 'none';
         });
@@ -1292,20 +1373,49 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             if (isMouseDragging) {
                 e.preventDefault();
                 
+                const currentTime = Date.now();
                 const deltaX = e.clientX - lastMouseX;
                 const deltaY = e.clientY - lastMouseY;
+                const deltaTime = currentTime - lastDragTime;
                 
-                // Generous pan bounds
-                const maxTranslateX = Math.max(0, (scale - 0.3) * imgElement.clientWidth / 2);
-                const maxTranslateY = Math.max(0, (scale - 0.3) * imgElement.clientHeight / 2);
+                // Calculate velocity for momentum
+                if (deltaTime > 0) {
+                    dragVelocityX = deltaX / deltaTime * 16; // 60fps normalization
+                    dragVelocityY = deltaY / deltaTime * 16;
+                }
                 
-                translateX = Math.min(Math.max(translateX + deltaX, -maxTranslateX), maxTranslateX);
-                translateY = Math.min(Math.max(translateY + deltaY, -maxTranslateY), maxTranslateY);
+                // Generous and responsive pan bounds with edge resistance
+                const maxTranslateX = Math.max(0, (scale - 0.8) * imgElement.clientWidth / 2);
+                const maxTranslateY = Math.max(0, (scale - 0.8) * imgElement.clientHeight / 2);
+                
+                let newTranslateX = translateX + deltaX;
+                let newTranslateY = translateY + deltaY;
+                
+                // Add edge resistance when near boundaries
+                if (newTranslateX > maxTranslateX) {
+                    const overshoot = newTranslateX - maxTranslateX;
+                    newTranslateX = maxTranslateX + overshoot * 0.3; // Resistance factor
+                } else if (newTranslateX < -maxTranslateX) {
+                    const overshoot = -maxTranslateX - newTranslateX;
+                    newTranslateX = -maxTranslateX - overshoot * 0.3;
+                }
+                
+                if (newTranslateY > maxTranslateY) {
+                    const overshoot = newTranslateY - maxTranslateY;
+                    newTranslateY = maxTranslateY + overshoot * 0.3;
+                } else if (newTranslateY < -maxTranslateY) {
+                    const overshoot = -maxTranslateY - newTranslateY;
+                    newTranslateY = -maxTranslateY - overshoot * 0.3;
+                }
+                
+                translateX = newTranslateX;
+                translateY = newTranslateY;
                 
                 this.updateImageTransform(imgElement, scale, translateX, translateY);
                 
                 lastMouseX = e.clientX;
                 lastMouseY = e.clientY;
+                lastDragTime = currentTime;
             }
         });
         
@@ -1314,7 +1424,17 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
                 e.preventDefault();
                 isMouseDragging = false;
                 imgElement.style.cursor = 'grab';
-                imgElement.style.transition = 'transform 0.3s ease-out';
+                
+                // Apply momentum scrolling if drag was fast enough
+                const dragDuration = Date.now() - dragStartTime;
+                const totalVelocity = Math.sqrt(dragVelocityX * dragVelocityX + dragVelocityY * dragVelocityY);
+                
+                if (dragDuration < 300 && totalVelocity > 2) {
+                    this.applyMomentumScrolling(imgElement, dragVelocityX, dragVelocityY, scale);
+                } else {
+                    // Snap back to bounds if overshot
+                    this.snapToBounds(imgElement, scale);
+                }
             }
         });
         
@@ -1322,26 +1442,101 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             if (isMouseDragging) {
                 isMouseDragging = false;
                 imgElement.style.cursor = 'grab';
-                imgElement.style.transition = 'transform 0.3s ease-out';
+                // Snap back to bounds when mouse leaves
+                this.snapToBounds(imgElement, scale);
             }
         });
         
-        // Smart double click for desktop
+        // Right-click context menu for additional controls
+        imgElement.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            
+            // Simple context menu with reset options
+            const contextMenu = document.createElement('div');
+            contextMenu.className = 'image-context-menu';
+            contextMenu.style.cssText = `
+                position: fixed;
+                left: ${e.clientX}px;
+                top: ${e.clientY}px;
+                background: white;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+                z-index: 10000;
+                padding: 4px 0;
+                font-size: 14px;
+                min-width: 120px;
+            `;
+            
+            // Reset zoom option
+            const resetOption = document.createElement('div');
+            resetOption.textContent = '🔍 Reset Zoom (100%)';
+            resetOption.style.cssText = `
+                padding: 8px 12px;
+                cursor: pointer;
+                transition: background-color 0.2s;
+            `;
+            resetOption.addEventListener('mouseenter', () => resetOption.style.backgroundColor = '#f0f0f0');
+            resetOption.addEventListener('mouseleave', () => resetOption.style.backgroundColor = '');
+            resetOption.addEventListener('click', () => {
+                scale = 1.0;
+                translateX = 0;
+                translateY = 0;
+                imgElement.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+                this.updateImageTransform(imgElement, scale, translateX, translateY);
+                document.body.removeChild(contextMenu);
+            });
+            
+            // Fit to screen option
+            const fitOption = document.createElement('div');
+            fitOption.textContent = '📐 Fit to Screen';
+            fitOption.style.cssText = `
+                padding: 8px 12px;
+                cursor: pointer;
+                transition: background-color 0.2s;
+            `;
+            fitOption.addEventListener('mouseenter', () => fitOption.style.backgroundColor = '#f0f0f0');
+            fitOption.addEventListener('mouseleave', () => fitOption.style.backgroundColor = '');
+            fitOption.addEventListener('click', () => {
+                this.autoFitImage(imgElement);
+                document.body.removeChild(contextMenu);
+            });
+            
+            contextMenu.appendChild(resetOption);
+            contextMenu.appendChild(fitOption);
+            document.body.appendChild(contextMenu);
+            
+            // Remove context menu when clicking elsewhere
+            const removeMenu = (event: MouseEvent) => {
+                if (!contextMenu.contains(event.target as Node)) {
+                    document.body.removeChild(contextMenu);
+                    document.removeEventListener('click', removeMenu);
+                }
+            };
+            setTimeout(() => document.addEventListener('click', removeMenu), 0);
+        });
+        
+        // Smooth double click for desktop
         imgElement.addEventListener('dblclick', (e) => {
             e.preventDefault();
             
-            // Cycle through common zoom levels
-            const currentIndex = this.getClosestZoomIndex(scale);
-            let nextIndex = currentIndex + 1;
-            
-            if (nextIndex >= ZOOM_LEVELS.length) {
-                nextIndex = 0;
+            // Cycle through useful zoom levels smoothly
+            if (scale < 1.2) {
+                // If at base zoom, go to 1.5x
+                scale = 1.5;
+            } else if (scale < 2.0) {
+                // If at 1.5x, go to 2x
+                scale = 2.0;
+            } else if (scale < 3.0) {
+                // If at 2x, go to 3x
+                scale = 3.0;
+            } else {
+                // If zoomed in, reset to base
+                scale = 1.0;
             }
             
-            scale = ZOOM_LEVELS[nextIndex];
-            
-            // Reset position for extreme zooms
-            if (scale <= 0.5 || scale >= 2) {
+            // Reset position for high zoom
+            if (scale >= 3.0) {
                 translateX = 0;
                 translateY = 0;
             }
@@ -1350,47 +1545,6 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             imgElement.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
             this.updateImageTransform(imgElement, scale, translateX, translateY);
         });
-    }
-    
-    /**
-     * Get smart zoom level - snaps to predefined levels
-     */
-    private getSmartZoomLevel(currentScale: number): number {
-        const ZOOM_LEVELS = [0.3, 0.5, 1.0, 1.5, 2.0, 3.0];
-        
-        // Find closest zoom level
-        let closest = ZOOM_LEVELS[0];
-        let minDiff = Math.abs(currentScale - closest);
-        
-        for (const level of ZOOM_LEVELS) {
-            const diff = Math.abs(currentScale - level);
-            if (diff < minDiff) {
-                minDiff = diff;
-                closest = level;
-            }
-        }
-        
-        return closest;
-    }
-    
-    /**
-     * Get closest zoom index for cycling
-     */
-    private getClosestZoomIndex(currentScale: number): number {
-        const ZOOM_LEVELS = [0.3, 0.5, 1.0, 1.5, 2.0, 3.0];
-        
-        let closestIndex = 0;
-        let minDiff = Math.abs(currentScale - ZOOM_LEVELS[0]);
-        
-        for (let i = 1; i < ZOOM_LEVELS.length; i++) {
-            const diff = Math.abs(currentScale - ZOOM_LEVELS[i]);
-            if (diff < minDiff) {
-                minDiff = diff;
-                closestIndex = i;
-            }
-        }
-        
-        return closestIndex;
     }
     
     /**
@@ -1413,12 +1567,12 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             const scaleY = bodyHeight / imgHeight;
             const fitScale = Math.min(scaleX, scaleY);
             
-            // Smart auto-fit: Tối thiểu 100% size (1.0) để ảnh không quá nhỏ
-            // Nếu ảnh nhỏ hơn modal thì để nguyên size (1.0)
-            // Nếu ảnh lớn hơn modal thì scale xuống vừa khít
-            const optimalScale = Math.max(fitScale, 1.0);
+            // Ensure minimum 100% zoom (1.0) and maximum 400% (4.0)
+            // If image is smaller than modal, keep at 100%
+            // If image is larger than modal, scale down but not below 100%
+            const optimalScale = Math.min(Math.max(fitScale, 1.0), 4.0);
             
-            // Set initial transform with smart fit
+            // Set initial transform with constrained fit
             imgElement.style.transform = `scale(${optimalScale})`;
             imgElement.style.transformOrigin = 'center center';
             
@@ -1437,9 +1591,9 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
         this.showZoomIndicator(imgElement, scale);
         
         // Update cursor based on zoom level
-        if (scale <= 0.5) {
+        if (scale <= 1.2) {
             imgElement.style.cursor = 'zoom-in';
-        } else if (scale >= 2.5) {
+        } else if (scale >= 3.5) {
             imgElement.style.cursor = 'zoom-out';
         } else {
             imgElement.style.cursor = 'grab';
@@ -1460,19 +1614,19 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
         const indicator = document.createElement('div');
         indicator.className = 'zoom-indicator';
         
-        // Add scale percentage and visual feedback
+        // Add scale percentage with smooth display
         const percentage = Math.round(scale * 100);
         let scaleText = `${percentage}%`;
         let scaleClass = '';
         
-        // Add contextual labels
-        if (scale <= 0.5) {
+        // Add contextual labels based on zoom level
+        if (scale <= 1.2) {
             scaleClass = 'zoom-small';
             scaleText += ' 🔍-';
-        } else if (scale >= 2.5) {
+        } else if (scale >= 3.5) {
             scaleClass = 'zoom-large';
             scaleText += ' 🔍+';
-        } else if (Math.abs(scale - 1) < 0.1) {
+        } else if (Math.abs(scale - 1) < 0.05) {
             scaleClass = 'zoom-normal';
             scaleText = '100% ✓';
         }
@@ -1500,7 +1654,7 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
                         }
                     }, 300);
                 }
-            }, 1800);
+            }, 1200); // Giảm thời gian hiển thị từ 1800ms xuống 1200ms để smoother
         }
     }
 
@@ -1511,6 +1665,99 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
         const dx = touch1.clientX - touch2.clientX;
         const dy = touch1.clientY - touch2.clientY;
         return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    /**
+     * Apply momentum scrolling after mouse drag
+     */
+    private applyMomentumScrolling(imgElement: HTMLImageElement, velocityX: number, velocityY: number, currentScale: number): void {
+        const friction = 0.95; // Friction factor
+        const minVelocity = 0.1; // Minimum velocity to continue animation
+        
+        let currentVelocityX = velocityX;
+        let currentVelocityY = velocityY;
+        
+        const animate = () => {
+            // Apply friction
+            currentVelocityX *= friction;
+            currentVelocityY *= friction;
+            
+            // Get current transform values
+            const computedStyle = window.getComputedStyle(imgElement);
+            const matrix = computedStyle.transform;
+            let currentTranslateX = 0;
+            let currentTranslateY = 0;
+            
+            if (matrix && matrix !== 'none') {
+                const matrixMatch = matrix.match(/matrix\(([^)]+)\)/);
+                if (matrixMatch) {
+                    const values = matrixMatch[1].split(',').map(parseFloat);
+                    currentTranslateX = values[4] * currentScale; // Extract translateX and scale back
+                    currentTranslateY = values[5] * currentScale; // Extract translateY and scale back
+                }
+            }
+            
+            // Calculate new position
+            const newTranslateX = currentTranslateX + currentVelocityX;
+            const newTranslateY = currentTranslateY + currentVelocityY;
+            
+            // Apply bounds
+            const maxTranslateX = Math.max(0, (currentScale - 0.8) * imgElement.clientWidth / 2);
+            const maxTranslateY = Math.max(0, (currentScale - 0.8) * imgElement.clientHeight / 2);
+            
+            const boundedTranslateX = Math.min(Math.max(newTranslateX, -maxTranslateX), maxTranslateX);
+            const boundedTranslateY = Math.min(Math.max(newTranslateY, -maxTranslateY), maxTranslateY);
+            
+            // Apply transform
+            imgElement.style.transform = `scale(${currentScale}) translate(${boundedTranslateX / currentScale}px, ${boundedTranslateY / currentScale}px)`;
+            
+            // Continue animation if velocity is significant
+            const totalVelocity = Math.sqrt(currentVelocityX * currentVelocityX + currentVelocityY * currentVelocityY);
+            if (totalVelocity > minVelocity && 
+                (newTranslateX === boundedTranslateX && newTranslateY === boundedTranslateY)) {
+                requestAnimationFrame(animate);
+            } else {
+                // Final snap to bounds
+                imgElement.style.transition = 'transform 0.3s ease-out';
+                imgElement.style.transform = `scale(${currentScale}) translate(${boundedTranslateX / currentScale}px, ${boundedTranslateY / currentScale}px)`;
+            }
+        };
+        
+        // Start momentum animation
+        imgElement.style.transition = 'none';
+        requestAnimationFrame(animate);
+    }
+
+    /**
+     * Snap image back to bounds with smooth animation
+     */
+    private snapToBounds(imgElement: HTMLImageElement, currentScale: number): void {
+        // Get current transform values
+        const computedStyle = window.getComputedStyle(imgElement);
+        const matrix = computedStyle.transform;
+        let currentTranslateX = 0;
+        let currentTranslateY = 0;
+        
+        if (matrix && matrix !== 'none') {
+            const matrixMatch = matrix.match(/matrix\(([^)]+)\)/);
+            if (matrixMatch) {
+                const values = matrixMatch[1].split(',').map(parseFloat);
+                currentTranslateX = values[4] * currentScale; // Extract translateX and scale back
+                currentTranslateY = values[5] * currentScale; // Extract translateY and scale back
+            }
+        }
+        
+        // Calculate bounds
+        const maxTranslateX = Math.max(0, (currentScale - 0.8) * imgElement.clientWidth / 2);
+        const maxTranslateY = Math.max(0, (currentScale - 0.8) * imgElement.clientHeight / 2);
+        
+        // Snap to bounds
+        const boundedTranslateX = Math.min(Math.max(currentTranslateX, -maxTranslateX), maxTranslateX);
+        const boundedTranslateY = Math.min(Math.max(currentTranslateY, -maxTranslateY), maxTranslateY);
+        
+        // Apply smooth transition back to bounds
+        imgElement.style.transition = 'transform 0.3s ease-out';
+        imgElement.style.transform = `scale(${currentScale}) translate(${boundedTranslateX / currentScale}px, ${boundedTranslateY / currentScale}px)`;
     }
 
     /**
