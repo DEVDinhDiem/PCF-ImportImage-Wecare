@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <manifest>
-  <control namespace="CustomComponent" constructor="ImportFile" version="0.0.1" display-name-key="ImportFile" description-key="ImportFile description" control-type="standard" >
+  <control namespace="CustomComponent" constructor="ImportImage" version="0.0.1" display-name-key="ImportImage" description-key="ImportImage description" control-type="standard" >
     <type-group name="fieldTypes">
       <type>SingleLine.Text</type>
     </type-group>

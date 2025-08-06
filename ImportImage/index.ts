@@ -9,7 +9,7 @@ interface DataverseImageRecord {
     crdfd_table?: string;
 }
 
-export class ImportFile implements ComponentFramework.StandardControl<IInputs, IOutputs> {
+export class ImportImage implements ComponentFramework.StandardControl<IInputs, IOutputs> {
     private _container: HTMLDivElement;
     private _context: ComponentFramework.Context<IInputs>;
     private _notifyOutputChanged: () => void;
@@ -959,6 +959,12 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
                     <div class="image-modal-body">
                         <img src="${fullImageUrl}" alt="Full size image" class="image-modal-img" crossorigin="anonymous">
                         <div class="image-loading">Đang tải ảnh full size...</div>
+                        <div class="zoom-instructions">
+                            ${this.isMobileEnvironment() ? 
+                                'Pinch để zoom • Kéo để xem các góc • Double-tap để reset' : 
+                                'Scroll để zoom • Kéo để xem các góc • Double-click để reset'
+                            }
+                        </div>
                     </div>
                     <div class="image-modal-footer">
                         <button class="image-modal-download">📥 Tải về</button>
@@ -996,10 +1002,25 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
             img.addEventListener('load', () => {
                 loadingDiv.style.display = 'none';
                 img.style.display = 'block';
+                
+                // Show zoom instructions after image loads
+                const instructions = modalOverlay.querySelector('.zoom-instructions') as HTMLDivElement;
+                if (instructions) {
+                    setTimeout(() => {
+                        instructions.style.opacity = '1';
+                        setTimeout(() => {
+                            instructions.style.opacity = '0';
+                        }, 3000); // Hide after 3 seconds
+                    }, 500);
+                }
+                
+                // Auto-fit image to modal size on load
+                this.autoFitImage(img);
+                
                 if (this.isMobileEnvironment()) {
-                    this.updateStatus('Ảnh full size đã tải. Pinch để zoom, double-tap để reset', 'success');
+                    this.updateStatus('Ảnh full size đã tải. Pinch để zoom, kéo để xem các góc', 'success');
                 } else {
-                    this.updateStatus('Ảnh full size đã được tải', 'success');
+                    this.updateStatus('Ảnh full size đã được tải. Scroll để zoom, kéo để xem các góc', 'success');
                 }
             });
             
@@ -1093,44 +1114,394 @@ export class ImportFile implements ComponentFramework.StandardControl<IInputs, I
     }
 
     /**
-     * Add pinch to zoom functionality for mobile
+     * Add pinch to zoom functionality for mobile with smart zoom levels
      */
     private addPinchToZoom(imgElement: HTMLImageElement): void {
         let scale = 1;
         let startDistance = 0;
         let initialScale = 1;
+        let translateX = 0;
+        let translateY = 0;
+        let lastTouchX = 0;
+        let lastTouchY = 0;
+        let isPanning = false;
+        let isZooming = false;
+        
+        // Predefined smart zoom levels for mobile
+        const ZOOM_LEVELS = [0.3, 0.5, 1.0, 1.5, 2.0, 3.0];
+        
+        // Get initial scale from the element (from autoFit)
+        const computedStyle = window.getComputedStyle(imgElement);
+        const matrix = computedStyle.transform;
+        if (matrix && matrix !== 'none') {
+            const matrixMatch = matrix.match(/matrix\(([^)]+)\)/);
+            if (matrixMatch) {
+                const values = matrixMatch[1].split(',').map(parseFloat);
+                scale = values[0]; // First value is scaleX
+            }
+        }
+        
+        // Set initial styles for better transform handling
+        imgElement.style.transformOrigin = 'center center';
+        imgElement.style.transition = 'transform 0.3s ease-out';
         
         imgElement.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            
             if (e.touches.length === 2) {
-                e.preventDefault();
+                // Two finger pinch to zoom
                 startDistance = this.getDistance(e.touches[0], e.touches[1]);
                 initialScale = scale;
+                isZooming = true;
+                imgElement.style.transition = 'none'; // Disable transition during pinch
+            } else if (e.touches.length === 1) {
+                // Single finger - allow panning at any scale
+                isPanning = true;
+                lastTouchX = e.touches[0].clientX;
+                lastTouchY = e.touches[0].clientY;
+                imgElement.style.transition = 'none'; // Disable transition during pan
             }
         });
         
         imgElement.addEventListener('touchmove', (e) => {
-            if (e.touches.length === 2) {
-                e.preventDefault();
+            e.preventDefault();
+            
+            if (e.touches.length === 2 && isZooming) {
+                // Pinch zoom with smooth scaling
                 const currentDistance = this.getDistance(e.touches[0], e.touches[1]);
                 const scaleChange = currentDistance / startDistance;
-                scale = Math.min(Math.max(0.5, initialScale * scaleChange), 3);
+                const newScale = initialScale * scaleChange;
                 
-                imgElement.style.transform = `scale(${scale})`;
+                // Smooth zoom bounds - allow more granular control
+                scale = Math.min(Math.max(0.2, newScale), 4);
+                
+                this.updateImageTransform(imgElement, scale, translateX, translateY);
+            } else if (e.touches.length === 1 && isPanning && !isZooming) {
+                // Pan image - allow at any zoom level
+                const deltaX = e.touches[0].clientX - lastTouchX;
+                const deltaY = e.touches[0].clientY - lastTouchY;
+                
+                // More generous pan bounds
+                const maxTranslateX = Math.max(0, (scale - 0.3) * imgElement.clientWidth / 2);
+                const maxTranslateY = Math.max(0, (scale - 0.3) * imgElement.clientHeight / 2);
+                
+                translateX = Math.min(Math.max(translateX + deltaX, -maxTranslateX), maxTranslateX);
+                translateY = Math.min(Math.max(translateY + deltaY, -maxTranslateY), maxTranslateY);
+                
+                this.updateImageTransform(imgElement, scale, translateX, translateY);
+                
+                lastTouchX = e.touches[0].clientX;
+                lastTouchY = e.touches[0].clientY;
             }
         });
         
-        // Double tap to reset zoom
+        // Smart double tap with predefined zoom levels
         let lastTouchEnd = 0;
+        let tapTimeout: NodeJS.Timeout | null = null;
+        
         imgElement.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            isPanning = false;
+            isZooming = false;
+            
+            // Re-enable smooth transition after touch ends
+            setTimeout(() => {
+                imgElement.style.transition = 'transform 0.3s ease-out';
+            }, 100);
+            
             const now = Date.now();
-            if (now - lastTouchEnd <= 300) {
-                e.preventDefault();
-                // Double tap - reset zoom
-                scale = 1;
-                imgElement.style.transform = 'scale(1)';
+            
+            if (tapTimeout) {
+                clearTimeout(tapTimeout);
+                tapTimeout = null;
             }
+            
+            if (now - lastTouchEnd <= 300) {
+                // Smart double tap cycling through zoom levels
+                const currentIndex = this.getClosestZoomIndex(scale);
+                let nextIndex = currentIndex + 1;
+                
+                // Cycle back to start if at end
+                if (nextIndex >= ZOOM_LEVELS.length) {
+                    nextIndex = 0;
+                }
+                
+                scale = ZOOM_LEVELS[nextIndex];
+                
+                // Reset position for extreme zoom levels
+                if (scale <= 0.5 || scale >= 2) {
+                    translateX = 0;
+                    translateY = 0;
+                }
+                
+                imgElement.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+                this.updateImageTransform(imgElement, scale, translateX, translateY);
+            } else {
+                // Single tap - set timeout to handle it if no second tap comes
+                tapTimeout = setTimeout(() => {
+                    tapTimeout = null;
+                }, 300);
+            }
+            
             lastTouchEnd = now;
         });
+        
+        // Handle gestures ending
+        imgElement.addEventListener('touchcancel', (e) => {
+            e.preventDefault();
+            isPanning = false;
+            isZooming = false;
+            imgElement.style.transition = 'transform 0.3s ease-out';
+        });
+        
+        // Enhanced wheel zoom for desktop - smooth zoom without snapping
+        imgElement.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            
+            const delta = e.deltaY > 0 ? -0.15 : 0.15;
+            const newScale = scale + delta;
+            
+            // Smooth zoom without snapping - allow free zoom between bounds
+            scale = Math.min(Math.max(0.2, newScale), 4);
+            
+            // Reset position for very small or large scales
+            if (scale <= 0.5 || scale >= 3) {
+                translateX = 0;
+                translateY = 0;
+            }
+            
+            this.updateImageTransform(imgElement, scale, translateX, translateY);
+        });
+        
+        // Enhanced mouse drag support for desktop
+        let isMouseDragging = false;
+        let lastMouseX = 0;
+        let lastMouseY = 0;
+        
+        imgElement.addEventListener('mousedown', (e) => {
+            // Allow panning at any scale level
+            e.preventDefault();
+            isMouseDragging = true;
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+            imgElement.style.cursor = 'grabbing';
+            imgElement.style.transition = 'none';
+        });
+        
+        imgElement.addEventListener('mousemove', (e) => {
+            if (isMouseDragging) {
+                e.preventDefault();
+                
+                const deltaX = e.clientX - lastMouseX;
+                const deltaY = e.clientY - lastMouseY;
+                
+                // Generous pan bounds
+                const maxTranslateX = Math.max(0, (scale - 0.3) * imgElement.clientWidth / 2);
+                const maxTranslateY = Math.max(0, (scale - 0.3) * imgElement.clientHeight / 2);
+                
+                translateX = Math.min(Math.max(translateX + deltaX, -maxTranslateX), maxTranslateX);
+                translateY = Math.min(Math.max(translateY + deltaY, -maxTranslateY), maxTranslateY);
+                
+                this.updateImageTransform(imgElement, scale, translateX, translateY);
+                
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+            }
+        });
+        
+        imgElement.addEventListener('mouseup', (e) => {
+            if (isMouseDragging) {
+                e.preventDefault();
+                isMouseDragging = false;
+                imgElement.style.cursor = 'grab';
+                imgElement.style.transition = 'transform 0.3s ease-out';
+            }
+        });
+        
+        imgElement.addEventListener('mouseleave', (e) => {
+            if (isMouseDragging) {
+                isMouseDragging = false;
+                imgElement.style.cursor = 'grab';
+                imgElement.style.transition = 'transform 0.3s ease-out';
+            }
+        });
+        
+        // Smart double click for desktop
+        imgElement.addEventListener('dblclick', (e) => {
+            e.preventDefault();
+            
+            // Cycle through common zoom levels
+            const currentIndex = this.getClosestZoomIndex(scale);
+            let nextIndex = currentIndex + 1;
+            
+            if (nextIndex >= ZOOM_LEVELS.length) {
+                nextIndex = 0;
+            }
+            
+            scale = ZOOM_LEVELS[nextIndex];
+            
+            // Reset position for extreme zooms
+            if (scale <= 0.5 || scale >= 2) {
+                translateX = 0;
+                translateY = 0;
+            }
+            
+            imgElement.style.cursor = 'grab';
+            imgElement.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+            this.updateImageTransform(imgElement, scale, translateX, translateY);
+        });
+    }
+    
+    /**
+     * Get smart zoom level - snaps to predefined levels
+     */
+    private getSmartZoomLevel(currentScale: number): number {
+        const ZOOM_LEVELS = [0.3, 0.5, 1.0, 1.5, 2.0, 3.0];
+        
+        // Find closest zoom level
+        let closest = ZOOM_LEVELS[0];
+        let minDiff = Math.abs(currentScale - closest);
+        
+        for (const level of ZOOM_LEVELS) {
+            const diff = Math.abs(currentScale - level);
+            if (diff < minDiff) {
+                minDiff = diff;
+                closest = level;
+            }
+        }
+        
+        return closest;
+    }
+    
+    /**
+     * Get closest zoom index for cycling
+     */
+    private getClosestZoomIndex(currentScale: number): number {
+        const ZOOM_LEVELS = [0.3, 0.5, 1.0, 1.5, 2.0, 3.0];
+        
+        let closestIndex = 0;
+        let minDiff = Math.abs(currentScale - ZOOM_LEVELS[0]);
+        
+        for (let i = 1; i < ZOOM_LEVELS.length; i++) {
+            const diff = Math.abs(currentScale - ZOOM_LEVELS[i]);
+            if (diff < minDiff) {
+                minDiff = diff;
+                closestIndex = i;
+            }
+        }
+        
+        return closestIndex;
+    }
+    
+    /**
+     * Auto-fit image to modal size on load with smart sizing
+     */
+    private autoFitImage(imgElement: HTMLImageElement): void {
+        const modalBody = imgElement.closest('.image-modal-body') as HTMLElement;
+        if (!modalBody) return;
+        
+        const bodyWidth = modalBody.clientWidth;
+        const bodyHeight = modalBody.clientHeight;
+        
+        // Get natural image dimensions
+        const imgWidth = imgElement.naturalWidth;
+        const imgHeight = imgElement.naturalHeight;
+        
+        if (imgWidth && imgHeight) {
+            // Calculate scale to fit image optimally in the modal
+            const scaleX = bodyWidth / imgWidth;
+            const scaleY = bodyHeight / imgHeight;
+            const fitScale = Math.min(scaleX, scaleY);
+            
+            // Smart auto-fit: Tối thiểu 100% size (1.0) để ảnh không quá nhỏ
+            // Nếu ảnh nhỏ hơn modal thì để nguyên size (1.0)
+            // Nếu ảnh lớn hơn modal thì scale xuống vừa khít
+            const optimalScale = Math.max(fitScale, 1.0);
+            
+            // Set initial transform with smart fit
+            imgElement.style.transform = `scale(${optimalScale})`;
+            imgElement.style.transformOrigin = 'center center';
+            
+            // Always show cursor as grab since user can zoom
+            imgElement.style.cursor = 'grab';
+        }
+    }
+
+    /**
+     * Update image transform with scale and translation - enhanced with better feedback
+     */
+    private updateImageTransform(imgElement: HTMLImageElement, scale: number, translateX: number, translateY: number): void {
+        imgElement.style.transform = `scale(${scale}) translate(${translateX / scale}px, ${translateY / scale}px)`;
+        
+        // Show zoom level indicator with better styling
+        this.showZoomIndicator(imgElement, scale);
+        
+        // Update cursor based on zoom level
+        if (scale <= 0.5) {
+            imgElement.style.cursor = 'zoom-in';
+        } else if (scale >= 2.5) {
+            imgElement.style.cursor = 'zoom-out';
+        } else {
+            imgElement.style.cursor = 'grab';
+        }
+    }
+    
+    /**
+     * Show zoom level indicator temporarily with enhanced styling
+     */
+    private showZoomIndicator(imgElement: HTMLImageElement, scale: number): void {
+        // Remove existing indicator
+        const existingIndicator = document.querySelector('.zoom-indicator');
+        if (existingIndicator) {
+            existingIndicator.remove();
+        }
+        
+        // Create enhanced zoom indicator
+        const indicator = document.createElement('div');
+        indicator.className = 'zoom-indicator';
+        
+        // Add scale percentage and visual feedback
+        const percentage = Math.round(scale * 100);
+        let scaleText = `${percentage}%`;
+        let scaleClass = '';
+        
+        // Add contextual labels
+        if (scale <= 0.5) {
+            scaleClass = 'zoom-small';
+            scaleText += ' 🔍-';
+        } else if (scale >= 2.5) {
+            scaleClass = 'zoom-large';
+            scaleText += ' 🔍+';
+        } else if (Math.abs(scale - 1) < 0.1) {
+            scaleClass = 'zoom-normal';
+            scaleText = '100% ✓';
+        }
+        
+        indicator.textContent = scaleText;
+        indicator.classList.add(scaleClass);
+        
+        // Add to modal body with better positioning
+        const modalBody = imgElement.closest('.image-modal-body');
+        if (modalBody) {
+            modalBody.appendChild(indicator);
+            
+            // Animate in
+            indicator.style.opacity = '1';
+            indicator.style.transform = 'scale(1)';
+            
+            // Auto hide with smooth fade
+            setTimeout(() => {
+                if (indicator.parentNode) {
+                    indicator.style.opacity = '0';
+                    indicator.style.transform = 'scale(0.8)';
+                    setTimeout(() => {
+                        if (indicator.parentNode) {
+                            indicator.remove();
+                        }
+                    }, 300);
+                }
+            }, 1800);
+        }
     }
 
     /**
