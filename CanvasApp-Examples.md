@@ -1,4 +1,4 @@
-# Canvas App Integration Examples
+# Canvas App Integration Examples - Multiple Images
 
 ## 1. Basic Integration
 
@@ -6,98 +6,161 @@
 ```powerFx
 // Trong OnVisible của Screen
 Set(FileUploadStatus, "");
-Set(UploadedFileName, "");
-Set(FileContentBase64, "");
+Set(SelectedImages, []);
+Set(ImagesCount, 0);
 ```
 
-### Monitor file selection và paste
+### Monitor images selection và paste
 ```powerFx
-// Trong OnChange của ImportFile control
-If(!IsBlank(ImportFileControl.fileName),
-    Set(UploadedFileName, ImportFileControl.fileName);
-    Set(FileContentBase64, ImportFileControl.fileContent);
-    
-    // Kiểm tra xem có phải là hình paste không
-    If(StartsWith(ImportFileControl.fileName, "Pasted_Image_"),
-        Notify("Hình ảnh đã được paste: " & ImportFileControl.fileName, NotificationType.Information),
-        Notify("File đã chọn: " & ImportFileControl.fileName, NotificationType.Information)
-    )
-);
-```
-
-# Handle upload status
-```powerFx
-// Trong OnChange của ImportFile control cho uploadStatus
-Switch(ImportFileControl.uploadStatus,
-    "ready", 
-    Notify("File sẵn sàng để sử dụng!", NotificationType.Success);
-    Set(FileUploadStatus, "ready"),
-    
-    "error", 
-    Notify("Có lỗi với file!", NotificationType.Error);
-    Set(FileUploadStatus, "failed")
-);
-```
-
-## 2. Image Paste Handling
-
-### Xử lý hình ảnh paste đặc biệt
-```powerFx
-// Kiểm tra file type và xử lý accordingly
-With({
-    fileName: ImportFileControl.fileName,
-    fileContent: ImportFileControl.fileContent
-},
-    Switch(true,
-        // Hình paste
-        StartsWith(fileName, "Pasted_Image_"),
-        Concurrent(
-            Set(ImageSource, "data:image/png;base64," & fileContent),
-            Set(ImageDisplayName, "Screenshot " & Text(Now(), "dd/mm/yyyy hh:mm")),
-            Notify("Hình ảnh đã được paste thành công", NotificationType.Success)
-        ),
-        
-        // File upload thông thường
-        !IsBlank(fileContent),
-        Concurrent(
-            Set(DocumentContent, fileContent),
-            Set(DocumentName, fileName),
-            Notify("File đã được chọn: " & fileName, NotificationType.Information)
+// Trong OnChange của ImportImagesControl
+If(ImportImagesControl.imagesCount > 0,
+    // Parse images list with notes
+    Set(SelectedImages, 
+        ForAll(
+            ParseJSON(ImportImagesControl.imagesList),
+            {
+                Name: Text(ThisRecord.name),
+                Content: Text(ThisRecord.content),
+                Size: Value(Text(ThisRecord.size)),
+                Type: Text(ThisRecord.type),
+                Index: Value(Text(ThisRecord.index)),
+                Note: Text(ThisRecord.note)
+            }
         )
-    )
+    );
+    Set(ImagesCount, ImportImagesControl.imagesCount);
+    
+    // Show notification
+    Notify($"Đã chọn {ImportImagesControl.imagesCount} hình ảnh", NotificationType.Success);
+    
+    // Update status
+    Set(FileUploadStatus, "ready")
 );
 ```
 
-### Hiển thị hình ảnh paste trong Image control
+## 2. Gallery Display với Multiple Images
+
+### Hiển thị tất cả hình trong Gallery
 ```powerFx
-// Trong Image control, set Image property:
-If(StartsWith(ImportFileControl.fileName, "Pasted_Image_"),
-    "data:image/" & 
-    Right(ImportFileControl.fileName, Len(ImportFileControl.fileName) - Find(".", ImportFileControl.fileName)) & 
-    ";base64," & ImportFileControl.fileContent,
-    Blank()
+// Gallery Items property:
+SelectedImages
+
+// Trong Gallery - Image control:
+"data:" & ThisItem.Type & ";base64," & ThisItem.Content
+
+// Label hiển thị tên file:
+ThisItem.Name
+
+// Label hiển thị ghi chú:
+If(IsBlank(ThisItem.Note), 
+    "(Chưa có ghi chú)", 
+    ThisItem.Note
+)
+
+// Label hiển thị size:
+If(ThisItem.Size < 1024, 
+    Text(ThisItem.Size) & " bytes",
+    If(ThisItem.Size < 1024*1024,
+        Text(Round(ThisItem.Size/1024, 1)) & " KB", 
+        Text(Round(ThisItem.Size/(1024*1024), 1)) & " MB"
+    )
 )
 ```
 
-### Save pasted image to Dataverse
+### Batch Upload tất cả hình với notes
 ```powerFx
-// Tạo record cho hình paste
-If(ImportFileControl.uploadStatus = "ready" && StartsWith(ImportFileControl.fileName, "Pasted_Image_"),
-    Patch('Custom Images',
-        Defaults('Custom Images'),
+// Button OnSelect - Upload all images with notes
+ForAll(SelectedImages,
+    Patch('Image Storage',
+        Defaults('Image Storage'),
         {
-            Title: "Pasted Image " & Text(Now(), "dd/mm/yyyy hh:mm:ss"),
-            'Image Name': ImportFileControl.fileName,
-            'Image Content': ImportFileControl.fileContent,
-            'Created By': User(),
-            'Created On': Now()
+            'File Name': Name,
+            'File Content': Content,
+            'File Size': Size,
+            'Content Type': Type,
+            'Image Note': If(IsBlank(Note), "", Note),
+            'Upload Date': Now(),
+            'Uploaded By': User().Email
         }
-    );
-    Notify("Hình ảnh đã được lưu vào database", NotificationType.Success)
+    )
+);
+Notify($"Đã upload {CountRows(SelectedImages)} hình ảnh với ghi chú", NotificationType.Success);
+```
+
+## 3. Advanced Image Processing
+
+### Lọc hình theo loại
+```powerFx
+// Chỉ lấy hình JPG/JPEG
+Set(JpegImages, 
+    Filter(SelectedImages, 
+        ThisRecord.Type = "image/jpeg" || ThisRecord.Type = "image/jpg"
+    )
+);
+
+// Chỉ lấy hình PNG
+Set(PngImages, 
+    Filter(SelectedImages, ThisRecord.Type = "image/png")
+);
+
+// Lọc hình theo size (< 1MB)
+Set(SmallImages,
+    Filter(SelectedImages, ThisRecord.Size < 1024*1024)
 );
 ```
 
-## 3. Advanced Integration với Dataverse
+## 4. Notes Management
+
+### Lọc hình có ghi chú và không có ghi chú
+```powerFx
+// Hình có ghi chú
+Set(ImagesWithNotes, 
+    Filter(SelectedImages, !IsBlank(ThisRecord.Note))
+);
+
+// Hình không có ghi chú
+Set(ImagesWithoutNotes, 
+    Filter(SelectedImages, IsBlank(ThisRecord.Note))
+);
+
+// Thống kê
+Set(NotesStats, {
+    Total: CountRows(SelectedImages),
+    WithNotes: CountRows(ImagesWithNotes),
+    WithoutNotes: CountRows(ImagesWithoutNotes)
+});
+```
+
+### Tìm kiếm hình theo nội dung ghi chú
+```powerFx
+// Search trong notes
+Set(SearchResults,
+    Filter(SelectedImages, 
+        SearchKeyword in Lower(ThisRecord.Note) ||
+        SearchKeyword in Lower(ThisRecord.Name)
+    )
+);
+```
+
+### Validation notes trước khi upload
+```powerFx
+// Kiểm tra hình nào chưa có ghi chú
+Set(MissingNotes,
+    Filter(SelectedImages, IsBlank(ThisRecord.Note))
+);
+
+If(CountRows(MissingNotes) > 0,
+    // Hiển thị cảnh báo
+    Set(ShowNoteWarning, true);
+    Set(WarningMessage, 
+        $"Có {CountRows(MissingNotes)} hình chưa có ghi chú. Bạn có muốn tiếp tục?"
+    ),
+    // Cho phép upload
+    Set(CanUpload, true)
+);
+```
+
+## 5. Advanced Integration với Dataverse
 
 ### Tạo custom entity để track uploads
 ```powerFx

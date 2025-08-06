@@ -1,16 +1,19 @@
-# Import File PCF Control
+# Import Images PCF Control
 
-Đây là một PCF (PowerApps Component Framework) control cho phép import file trong Canvas App và lưu vào Dataverse.
+Đây là một PCF (PowerApps Component Framework) control cho phép import nhiều hình ảnh trong Canvas App với preview và quản lý.
 
 ## Tính năng
 
-- ✅ Drag & Drop interface để chọn file
+- ✅ **Upload nhiều hình ảnh** từ file explorer
+- ✅ **Drag & Drop interface** để chọn nhiều file
 - ✅ **Paste hình ảnh từ clipboard (Ctrl+V)**
-- ✅ Hỗ trợ nhiều định dạng file (PDF, Excel, Word, CSV, JSON, images, v.v.)
-- ✅ Tự động đặt tên file cho hình paste
-- ✅ Status feedback cho người dùng
-- ✅ Responsive design
-- ✅ Output file content dưới dạng base64 để Canvas App sử dụng
+- ✅ **Preview grid** hiển thị tất cả hình ảnh đã chọn
+- ✅ **Ghi chú cho từng hình**: Textarea để nhập ghi chú cho mỗi hình ảnh
+- ✅ **Quản lý hình ảnh**: Xóa từng hình hoặc xóa tất cả
+- ✅ **Hỗ trợ định dạng**: PNG, JPG, JPEG, GIF, BMP, WEBP
+- ✅ **Tự động đặt tên** file cho hình paste
+- ✅ **Output JSON array** chứa tất cả hình ảnh kèm ghi chú để Canvas App sử dụng
+- ✅ **Responsive design** hoạt động trên desktop và mobile
 
 ## Cách sử dụng
 
@@ -36,53 +39,113 @@ pac solution import --path "ImportFileControl.zip"
    - Chọn "ImportFile" control
 
 2. Bind các output properties:
-   - `fileName`: Tên file đã chọn
-   - `fileContent`: Nội dung file dưới dạng base64
-   - `uploadStatus`: Trạng thái upload (success/error/info)
+   - `fileName`: Tên file đầu tiên (backward compatibility)
+   - `fileContent`: Nội dung file đầu tiên dưới dạng base64 (backward compatibility)  
+   - `uploadStatus`: Trạng thái (ready khi có ảnh)
+   - `imagesList`: JSON array chứa tất cả hình ảnh
+   - `imagesCount`: Số lượng hình ảnh đã chọn
 
-### 3. Xử lý kết quả upload
+### 3. Xử lý kết quả - Nhiều hình ảnh
 
 ```powerFx
-// Kiểm tra file đã sẵn sàng
-If(ImportFileControl.uploadStatus = "ready",
-    Notify("File sẵn sàng: " & ImportFileControl.fileName, NotificationType.Success),
-    ImportFileControl.uploadStatus = "error",
-    Notify("Có lỗi xảy ra với file", NotificationType.Error)
+// Parse danh sách hình ảnh
+Set(ImagesCollection, 
+    ForAll(
+        ParseJSON(ImportImagesControl.imagesList),
+        {
+            Name: Text(ThisRecord.name),
+            Content: Text(ThisRecord.content),
+            Size: Value(Text(ThisRecord.size)),
+            Type: Text(ThisRecord.type)
+        }
+    )
 );
 
-// Lấy thông tin file
-Set(SelectedFileName, ImportFileControl.fileName);
-Set(FileContentBase64, ImportFileControl.fileContent);
+// Kiểm tra số lượng hình
+If(ImportImagesControl.imagesCount > 0,
+    Notify($"Đã chọn {ImportImagesControl.imagesCount} hình ảnh", NotificationType.Success)
+);
 
-// Upload file tùy chỉnh sử dụng Power Automate hoặc Dataverse
-If(!IsBlank(FileContentBase64),
-    // Call Power Automate flow hoặc Patch trực tiếp vào Dataverse
-    'Upload File Flow'.Run(SelectedFileName, FileContentBase64)
+// Lưu tất cả hình vào Dataverse
+ForAll(ImagesCollection,
+    Patch('Image Gallery',
+        Defaults('Image Gallery'),
+        {
+            'Image Name': Name,
+            'Image Content': Content,
+            'File Size': Size,
+            'Content Type': Type,
+            'Upload Date': Now()
+        }
+    )
 );
 ```
 
-## Cấu trúc dữ liệu trong Dataverse
+### 4. Xử lý từng hình riêng lẻ
 
-Control sẽ tạo record trong bảng `annotation` với các trường:
-- `subject`: Tiêu đề (Imported file: [tên file])
-- `filename`: Tên file gốc
-- `documentbody`: Nội dung file (base64)
-- `mimetype`: MIME type của file
-- `notetext`: Ghi chú với timestamp
+```powerFx
+// Hiển thị trong Gallery control
+// Gallery Items property:
+ParseJSON(ImportImagesControl.imagesList)
 
-## Các định dạng file được hỗ trợ
+// Trong Gallery, Image control:
+"data:image/" & 
+Right(Text(ThisItem.type), Len(Text(ThisItem.type)) - Find("/", Text(ThisItem.type))) & 
+";base64," & Text(ThisItem.content)
+```
 
-- **Document**: PDF, DOC, DOCX
-- **Spreadsheet**: XLS, XLSX, CSV
-- **Text**: TXT, JSON
-- **Image**: PNG, JPG, JPEG, GIF, BMP (bao gồm paste từ clipboard)
+## Cấu trúc dữ liệu Output
 
-## Cách sử dụng Paste Image
+### imagesList (JSON Array)
+```json
+[
+  {
+    "name": "image1.jpg",
+    "content": "base64_encoded_content",
+    "size": 12345,
+    "type": "image/jpeg",
+    "index": 0,
+    "note": "Hình ảnh sản phẩm mới"
+  },
+  {
+    "name": "Pasted_Image_1641234567890.png", 
+    "content": "base64_encoded_content",
+    "size": 67890,
+    "type": "image/png",
+    "index": 1,
+    "note": "Screenshot từ meeting"
+  }
+]
+```
 
-1. **Copy hình ảnh**: Từ bất kỳ nguồn nào (web browser, file explorer, screenshot tool)
-2. **Click vào control**: Để focus vào PCF control
-3. **Paste**: Nhấn `Ctrl+V` để paste hình ảnh
-4. **Tự động xử lý**: Control sẽ tự động đặt tên file và convert sang base64
+### Backward Compatibility
+- `fileName`: Tên của hình đầu tiên
+- `fileContent`: Base64 content của hình đầu tiên  
+- `uploadStatus`: "ready" khi có hình ảnh
+
+## Các định dạng được hỗ trợ
+
+- **Image formats**: PNG, JPG, JPEG, GIF, BMP, WEBP
+- **Paste support**: Tất cả format image từ clipboard
+
+## Cách sử dụng
+
+### Upload Multiple Images
+1. **Click để chọn nhiều file**: Giữ Ctrl và click để chọn nhiều hình
+2. **Drag & Drop**: Kéo thả nhiều file hình ảnh cùng lúc  
+3. **Paste từ clipboard**: Copy hình từ bất kỳ đâu và Ctrl+V
+
+### Quản lý hình ảnh
+1. **Preview**: Tất cả hình sẽ hiển thị trong grid với thumbnail
+2. **Xóa từng hình**: Click nút "×" trên mỗi hình
+3. **Xóa tất cả**: Click nút "Xóa tất cả" 
+4. **Thông tin chi tiết**: Tên file và dung lượng hiển thị dưới mỗi hình
+5. **Ghi chú**: Textarea để nhập ghi chú cho từng hình ảnh
+
+### Tích hợp Canvas App
+1. Control tự động update `imagesCount` và `imagesList` 
+2. Parse JSON để lấy thông tin từng hình
+3. Sử dụng base64 content để hiển thị hoặc lưu trữ
 
 ## Customization
 
