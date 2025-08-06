@@ -1,0 +1,127 @@
+.import-file-container {
+    padding: 20px;
+    border: 2px dashed #cccccc;
+    border-radius: 8px;
+    text-align: center;
+    background-color: #fafafa;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    outline: none;
+}
+
+.import-file-container:hover {
+    border-color: #0078d7;
+    background-color: #f0f8ff;
+}
+
+.import-file-container:focus {
+    border-color: #0078d7;
+    background-color: #f0f8ff;
+    box-shadow: 0 0 0 2px rgba(0, 120, 215, 0.3);
+}
+
+.import-file-container.dragging {
+    border-color: #0078d7;
+    background-color: #e6f3ff;
+}
+
+.file-icon {
+    font-size: 48px;
+    color: #666666;
+    margin-bottom: 10px;
+}
+
+.upload-text {
+    font-size: 16px;
+    color: #333333;
+    margin-bottom: 8px;
+}
+
+.upload-hint {
+    font-size: 12px;
+    color: #666666;
+}
+
+.file-info {
+    margin-top: 15px;
+    padding: 10px;
+    background-color: #e8f4fd;
+    border-radius: 4px;
+    border-left: 4px solid #0078d7;
+}
+
+.file-name {
+    font-weight: bold;
+    color: #333333;
+}
+
+.file-size {
+    font-size: 12px;
+    color: #666666;
+}
+
+.upload-progress {
+    margin-top: 10px;
+    width: 100%;
+    height: 4px;
+    background-color: #e0e0e0;
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.progress-bar {
+    height: 100%;
+    background-color: #0078d7;
+    width: 0%;
+    transition: width 0.3s ease;
+}
+
+.status-message {
+    margin-top: 10px;
+    padding: 8px;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+.status-success {
+    background-color: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+}
+
+.status-error {
+    background-color: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+}
+
+.status-info {
+    background-color: #d1ecf1;
+    color: #0c5460;
+    border: 1px solid #bee5eb;
+}
+
+.hidden {
+    display: none;
+}
+
+.upload-button {
+    background-color: #0078d7;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    margin-top: 10px;
+}
+
+.upload-button:hover {
+    background-color: #106ebe;
+}
+
+.upload-button:disabled {
+    background-color: #cccccc;
+    cursor: not-allowed;
+}
