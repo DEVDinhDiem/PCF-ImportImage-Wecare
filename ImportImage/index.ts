@@ -64,18 +64,33 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
         this._context = context;
         
         // Get key data value for filtering
-        if (context.parameters.keyDataField && context.parameters.keyDataField.raw) {
-            const newKeyDataValue = context.parameters.keyDataField.raw;
+        const newKeyDataValue = context.parameters.keyDataField && context.parameters.keyDataField.raw;
+        const hasKeyDataChanged = this._keyDataValue !== newKeyDataValue;
+        
+        // Check if interface needs to be recreated based on key data availability
+        const hadKeyData = !!this._keyDataValue;
+        const hasKeyData = !!newKeyDataValue;
+        const keyDataStatusChanged = hadKeyData !== hasKeyData;
+        
+        if (keyDataStatusChanged) {
+            // Recreate interface when key data status changes (from no data to data or vice versa)
+            this.createFileUploadInterface();
+            this.setupEventListeners();
+        }
+        
+        if (newKeyDataValue) {
+            this._keyDataValue = newKeyDataValue;
             
-            // If key data changed, reload images
-            if (this._keyDataValue !== newKeyDataValue) {
-                this._keyDataValue = newKeyDataValue;
-                
+            // If key data changed and we have data, reload images
+            if (hasKeyDataChanged && hasKeyData) {
                 // Try to extract table name from entity metadata or context
                 this._tableName = this.getTableNameFromContext(context);
                 
                 this.loadExistingImages();
             }
+        } else {
+            // Clear key data when not available
+            this._keyDataValue = "";
         }
     }
 
@@ -112,6 +127,25 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
      * Creates the file upload interface
      */
     private createFileUploadInterface(): void {
+        // Check if keyDataField has value
+        const hasKeyData = this._context.parameters.keyDataField && this._context.parameters.keyDataField.raw;
+        
+        if (!hasKeyData) {
+            // Show save record message when no key data
+            this._container.innerHTML = `
+                <div class="import-file-container save-required" id="dropZone" tabindex="0">
+                    <div class="file-icon">💾</div>
+                    <div class="upload-text">Vui lòng lưu record trước</div>
+                    <div class="upload-hint">Bạn cần save/lưu record này trước khi có thể import hình ảnh</div>
+                    <div class="status-message status-info">
+                        ⚠️ Không thể import hình ảnh vào record chưa được lưu
+                    </div>
+                </div>
+            `;
+            return;
+        }
+
+        // Normal file upload interface when key data exists
         this._container.innerHTML = `
             <div class="import-file-container" id="dropZone" tabindex="0">
                 <div class="file-icon">📂</div>
@@ -140,6 +174,17 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
      */
     private setupEventListeners(): void {
         const dropZone = this._container.querySelector('#dropZone') as HTMLDivElement;
+
+        // Check if we have key data before setting up interactive event listeners
+        const hasKeyData = this._context.parameters.keyDataField && this._context.parameters.keyDataField.raw;
+        
+        if (!hasKeyData) {
+            // Only set up basic focus for save-required state
+            dropZone.addEventListener('click', () => {
+                this.updateStatus('Vui lòng lưu record trước khi import hình ảnh', 'error');
+            });
+            return;
+        }
 
         // Click to open file dialog
         dropZone.addEventListener('click', (e) => {
@@ -193,6 +238,12 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
      * Handles file selection
      */
     private onFileSelected(event: Event): void {
+        // Check if we have key data before processing
+        if (!this._keyDataValue) {
+            this.updateStatus('Vui lòng lưu record trước khi import hình ảnh', 'error');
+            return;
+        }
+
         const input = event.target as HTMLInputElement;
         if (input.files && input.files.length > 0) {
             this.addImages(Array.from(input.files));
@@ -225,6 +276,12 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
         const dropZone = this._container.querySelector('#dropZone') as HTMLDivElement;
         dropZone.classList.remove('dragging');
 
+        // Check if we have key data before processing
+        if (!this._keyDataValue) {
+            this.updateStatus('Vui lòng lưu record trước khi import hình ảnh', 'error');
+            return;
+        }
+
         if (event.dataTransfer && event.dataTransfer.files.length > 0) {
             this.addImages(Array.from(event.dataTransfer.files));
         }
@@ -235,6 +292,12 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
      */
     private onPaste(event: ClipboardEvent): void {
         event.preventDefault();
+        
+        // Check if we have key data before processing
+        if (!this._keyDataValue) {
+            this.updateStatus('Vui lòng lưu record trước khi import hình ảnh', 'error');
+            return;
+        }
         
         if (!event.clipboardData) return;
 
@@ -596,8 +659,12 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
         try {
             this.updateStatus('Đang tải hình ảnh có sẵn...', 'info');
             
-            // Query crdfd_multiimages table
-            const query = `?$filter=crdfd_key_data eq '${this._keyDataValue}'&$select=crdfd_multiimagesid,crdfd_image_name,crdfd_notes,crdfd_image,crdfd_table`;
+            // Query crdfd_multiimages table with table name filter
+            let query = `?$filter=crdfd_key_data eq '${this._keyDataValue}'`;
+            if (this._tableName && this._tableName !== 'unknown_table') {
+                query += ` and crdfd_table eq '${this._tableName}'`;
+            }
+            query += `&$select=crdfd_multiimagesid,crdfd_image_name,crdfd_notes,crdfd_image,crdfd_table`;
             
             const result = await this._context.webAPI.retrieveMultipleRecords("crdfd_multiimages", query);
             
@@ -1799,23 +1866,94 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
      */
     private getTableNameFromContext(context: ComponentFramework.Context<IInputs>): string {
         try {
-            // Try to extract from URL
+            // Method 1: Try to get from context page input (works for both web and mobile)
+            const contextWithPage = context as ComponentFramework.Context<IInputs> & { page?: { entityTypeName?: string } };
+            if (contextWithPage && contextWithPage.page && contextWithPage.page.entityTypeName) {
+                const tableName = contextWithPage.page.entityTypeName;
+                console.log('Table name found via context.page:', tableName);
+                return tableName;
+            }
+            
+            // Method 2: Try to get from context mode (alternative approach)
+            const contextMode = context.mode as ComponentFramework.Mode & { contextInfo?: { entityName?: string } };
+            if (context && context.mode && contextMode.contextInfo && contextMode.contextInfo.entityName) {
+                const tableName = contextMode.contextInfo.entityName;
+                console.log('Table name found via context.mode.contextInfo:', tableName);
+                return tableName;
+            }
+            
+            // Method 3: Try to extract from URL (mainly for web desktop)
             if (typeof window !== 'undefined' && window.location && window.location.href) {
                 const url = window.location.href;
-                // Pattern to match entity name in Dynamics URL
+                
+                // Pattern to match entity name in Dynamics URL (desktop)
                 const match = url.match(/etn=([^&]+)/);
                 if (match && match[1]) {
+                    console.log('Table name found via URL etn parameter:', match[1]);
                     return match[1];
                 }
                 
                 // Alternative pattern for different URL formats
                 const pathMatch = url.match(/\/main\.aspx.*[?&]etn=([^&]+)/);
                 if (pathMatch && pathMatch[1]) {
+                    console.log('Table name found via URL path match:', pathMatch[1]);
                     return pathMatch[1];
+                }
+                
+                // Power Apps mobile URL pattern
+                const mobileMatch = url.match(/\/apps\/[^/]+\/[^/]+\/([^/]+)/);
+                if (mobileMatch && mobileMatch[1]) {
+                    console.log('Table name found via mobile URL pattern:', mobileMatch[1]);
+                    return mobileMatch[1];
                 }
             }
             
-            // Default fallback
+            // Method 4: Try to get from context parameters or properties
+            try {
+                const contextWithParams = context as ComponentFramework.Context<IInputs> & { 
+                    parameters?: Record<string, { attributes?: { LogicalName?: string } }> 
+                };
+                if (contextWithParams && contextWithParams.parameters) {
+                    const params = contextWithParams.parameters;
+                    // Check if there's an entity reference parameter
+                    for (const key in params) {
+                        if (params[key] && params[key].attributes && params[key].attributes.LogicalName) {
+                            const tableName = params[key].attributes.LogicalName;
+                            console.log('Table name found via context parameters:', tableName);
+                            return tableName;
+                        }
+                    }
+                }
+            } catch (e) {
+                console.debug('Could not extract table name from parameters:', e);
+            }
+            
+            // Method 5: Try global context (if available)
+            interface XrmPage {
+                data?: {
+                    entity?: {
+                        getEntityName(): string;
+                    };
+                };
+            }
+            interface WindowWithXrm extends Window {
+                Xrm?: {
+                    Page?: XrmPage;
+                };
+            }
+            
+            if (typeof window !== 'undefined') {
+                const windowWithXrm = window as WindowWithXrm;
+                if (windowWithXrm.Xrm && windowWithXrm.Xrm.Page && windowWithXrm.Xrm.Page.data && windowWithXrm.Xrm.Page.data.entity) {
+                    const entityName = windowWithXrm.Xrm.Page.data.entity.getEntityName();
+                    if (entityName) {
+                        console.log('Table name found via Xrm.Page.data.entity:', entityName);
+                        return entityName;
+                    }
+                }
+            }
+            
+            console.warn('Could not determine table name from any method, using fallback');
             return 'unknown_table';
         } catch (error) {
             console.warn('Could not determine table name:', error);
