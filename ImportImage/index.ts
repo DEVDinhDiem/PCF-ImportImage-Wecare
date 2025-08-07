@@ -24,6 +24,7 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
     private _keyDataValue = "";
     private _existingImages: DataverseImageRecord[] = [];
     private _tableName = ""; // Store table name for crdfd_table field
+    private _debounceTimers = new Map<string, NodeJS.Timeout>(); // For debouncing note updates
 
     /**
      * Empty constructor.
@@ -101,6 +102,10 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
         if (this._fileInput) {
             this._fileInput.removeEventListener('change', this.onFileSelected.bind(this));
         }
+
+        // Clear all debounce timers
+        this._debounceTimers.forEach(timer => clearTimeout(timer));
+        this._debounceTimers.clear();
     }
 
     /**
@@ -342,7 +347,7 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             const noteTextarea = imageItem.querySelector('.image-note') as HTMLTextAreaElement;
             noteTextarea.addEventListener('input', (e) => {
                 const target = e.target as HTMLTextAreaElement;
-                this.updateImageNote(index, target.value);
+                this.debouncedUpdateImageNote(index, target.value);
             });
 
             // Prevent event bubbling when clicking on textarea
@@ -369,6 +374,32 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
         this.updateImageDisplay();
         this.processImages();
         this.updateStatus('Đã xóa hình ảnh', 'info');
+    }
+
+    /**
+     * Updates note for a specific image with debouncing
+     */
+    private debouncedUpdateImageNote(index: number, note: string): void {
+        // Clear existing timer for this image index
+        const timerKey = `new_${index}`;
+        const existingTimer = this._debounceTimers.get(timerKey);
+        if (existingTimer) {
+            clearTimeout(existingTimer);
+        }
+
+        // Set new timer
+        const timer = setTimeout(() => {
+            this.updateImageNote(index, note);
+            this._debounceTimers.delete(timerKey);
+        }, 500); // Shorter delay for new images since no API call
+
+        this._debounceTimers.set(timerKey, timer);
+
+        // Update local data immediately for responsive UI
+        while (this._imageNotes.length <= index) {
+            this._imageNotes.push('');
+        }
+        this._imageNotes[index] = note;
     }
 
     /**
@@ -652,7 +683,7 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             const noteTextarea = imageItem.querySelector('.image-note') as HTMLTextAreaElement;
             noteTextarea.addEventListener('input', (e) => {
                 const target = e.target as HTMLTextAreaElement;
-                this.updateExistingImageNote(record.crdfd_multiimagesid, target.value);
+                this.debouncedUpdateExistingImageNote(record.crdfd_multiimagesid, target.value);
             });
 
             // Prevent event bubbling
@@ -714,7 +745,7 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             const noteTextarea = imageItem.querySelector('.image-note') as HTMLTextAreaElement;
             noteTextarea.addEventListener('input', (e) => {
                 const target = e.target as HTMLTextAreaElement;
-                this.updateImageNote(index, target.value);
+                this.debouncedUpdateImageNote(index, target.value);
             });
 
             // Prevent event bubbling
@@ -823,6 +854,31 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
         } catch (error) {
             console.error("Error removing existing image:", error);
             this.updateStatus('Lỗi khi xóa hình ảnh', 'error');
+        }
+    }
+
+    /**
+     * Update note for existing image in Dataverse with debouncing
+     */
+    private debouncedUpdateExistingImageNote(imageId: string, note: string): void {
+        // Clear existing timer for this image
+        const existingTimer = this._debounceTimers.get(imageId);
+        if (existingTimer) {
+            clearTimeout(existingTimer);
+        }
+
+        // Set new timer
+        const timer = setTimeout(() => {
+            this.updateExistingImageNote(imageId, note);
+            this._debounceTimers.delete(imageId);
+        }, 800); // Wait 800ms after user stops typing
+
+        this._debounceTimers.set(imageId, timer);
+
+        // Update local data immediately for responsive UI
+        const existingImage = this._existingImages.find(img => img.crdfd_multiimagesid === imageId);
+        if (existingImage) {
+            existingImage.crdfd_notes = note;
         }
     }
 
@@ -1085,28 +1141,6 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
                 
                 this.updateStatus('Đang tải ảnh full size...', 'success');
             }
-        } catch (error) {
-            console.error('Error downloading image:', error);
-            this.updateStatus('Lỗi khi tải ảnh', 'error');
-        }
-    }
-
-    /**
-     * Download image from base64 data (fallback method)
-     */
-    private downloadImageFromBase64(base64Data: string, fileName: string): void {
-        try {
-            // Create download link
-            const link = document.createElement('a');
-            link.href = `data:image/png;base64,${base64Data}`;
-            link.download = fileName;
-            
-            // Trigger download
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            
-            this.updateStatus('Đã tải ảnh xuống (preview size)', 'success');
         } catch (error) {
             console.error('Error downloading image:', error);
             this.updateStatus('Lỗi khi tải ảnh', 'error');
