@@ -25,6 +25,7 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
     private _existingImages: DataverseImageRecord[] = [];
     private _tableName = ""; // Store table name for crdfd_table field
     private _debounceTimers = new Map<string, NodeJS.Timeout>(); // For debouncing note updates
+    private _isReadOnly = false; // Track if the component is in read-only mode
 
     /**
      * Empty constructor.
@@ -63,17 +64,22 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
     public updateView(context: ComponentFramework.Context<IInputs>): void {
         this._context = context;
         
+        // Check if the component is in read-only mode
+        const isReadOnly = this.checkReadOnlyState(context);
+        const readOnlyStateChanged = this._isReadOnly !== isReadOnly;
+        this._isReadOnly = isReadOnly;
+        
         // Get key data value for filtering
         const newKeyDataValue = context.parameters.keyDataField && context.parameters.keyDataField.raw;
         const hasKeyDataChanged = this._keyDataValue !== newKeyDataValue;
         
-        // Check if interface needs to be recreated based on key data availability
+        // Check if interface needs to be recreated based on key data availability or readonly state
         const hadKeyData = !!this._keyDataValue;
         const hasKeyData = !!newKeyDataValue;
         const keyDataStatusChanged = hadKeyData !== hasKeyData;
         
-        if (keyDataStatusChanged) {
-            // Recreate interface when key data status changes (from no data to data or vice versa)
+        if (keyDataStatusChanged || readOnlyStateChanged) {
+            // Recreate interface when key data status or readonly state changes
             this.createFileUploadInterface();
             this.setupEventListeners();
         }
@@ -145,7 +151,28 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             return;
         }
 
-        // Normal file upload interface when key data exists
+        // Check if component is in read-only mode
+        if (this._isReadOnly) {
+            // Show read-only interface - only allow viewing images
+            this._container.innerHTML = `
+                <div class="import-file-container readonly-mode" id="dropZone" tabindex="0">
+                    <div class="file-icon">👁️</div>
+                    <div class="upload-text">Chế độ xem</div>
+                    <div class="upload-hint">Field bị khóa - Chỉ có thể xem hình ảnh, không thể chỉnh sửa</div>
+                    <div id="previewContainer" class="preview-container">
+                        <div class="preview-header readonly-header">
+                            <span id="imageCount">0 hình ảnh</span>
+                            <div class="readonly-indicator">🔒 Chỉ đọc</div>
+                        </div>
+                        <div id="imageGrid" class="image-grid readonly-grid"></div>
+                    </div>
+                    <div id="statusMessage" class="status-message hidden"></div>
+                </div>
+            `;
+            return;
+        }
+
+        // Normal file upload interface when key data exists and not readonly
         this._container.innerHTML = `
             <div class="import-file-container" id="dropZone" tabindex="0">
                 <div class="file-icon">📂</div>
@@ -175,7 +202,7 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
     private setupEventListeners(): void {
         const dropZone = this._container.querySelector('#dropZone') as HTMLDivElement;
 
-        // Check if we have key data before setting up interactive event listeners
+        // Check if we have key data and not in readonly mode before setting up interactive event listeners
         const hasKeyData = this._context.parameters.keyDataField && this._context.parameters.keyDataField.raw;
         
         if (!hasKeyData) {
@@ -186,6 +213,17 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             return;
         }
 
+        if (this._isReadOnly) {
+            // In readonly mode, only allow viewing images - no editing functionality
+            this.updateStatus('Chế độ chỉ đọc - Không thể chỉnh sửa hình ảnh', 'info');
+            // Load existing images for viewing only
+            if (hasKeyData) {
+                this.loadExistingImages();
+            }
+            return;
+        }
+
+        // Normal interactive mode - full functionality
         // Click to open file dialog
         dropZone.addEventListener('click', (e) => {
             // Don't open file dialog if clicking on buttons or interactive elements
@@ -244,6 +282,12 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             return;
         }
 
+        // Check if component is in readonly mode
+        if (this._isReadOnly) {
+            this.updateStatus('Không thể chọn file trong chế độ chỉ đọc', 'error');
+            return;
+        }
+
         const input = event.target as HTMLInputElement;
         if (input.files && input.files.length > 0) {
             this.addImages(Array.from(input.files));
@@ -282,6 +326,12 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             return;
         }
 
+        // Check if component is in readonly mode
+        if (this._isReadOnly) {
+            this.updateStatus('Không thể kéo thả file trong chế độ chỉ đọc', 'error');
+            return;
+        }
+
         if (event.dataTransfer && event.dataTransfer.files.length > 0) {
             this.addImages(Array.from(event.dataTransfer.files));
         }
@@ -296,6 +346,12 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
         // Check if we have key data before processing
         if (!this._keyDataValue) {
             this.updateStatus('Vui lòng lưu record trước khi import hình ảnh', 'error');
+            return;
+        }
+
+        // Check if component is in readonly mode
+        if (this._isReadOnly) {
+            this.updateStatus('Không thể paste hình ảnh trong chế độ chỉ đọc', 'error');
             return;
         }
         
@@ -490,6 +546,12 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
      * Clears all selected images
      */
     private async clearAllImages(): Promise<void> {
+        // Check if component is in readonly mode
+        if (this._isReadOnly) {
+            this.updateStatus('Không thể xóa hình ảnh trong chế độ chỉ đọc', 'error');
+            return;
+        }
+
         const hasNewImages = this._selectedImages.length > 0;
         const hasExistingImages = this._existingImages.length > 0;
         
@@ -691,32 +753,52 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
         const imageCount = this._container.querySelector('#imageCount') as HTMLSpanElement;
 
         // Calculate total count
-        const totalCount = this._existingImages.length + this._selectedImages.length;
+        const totalCount = this._existingImages.length + (this._isReadOnly ? 0 : this._selectedImages.length);
         this._imagesCount = totalCount;
 
         // Update count display
         if (totalCount === 0) {
-            imageCount.textContent = `0 hình ảnh`;
-            previewContainer.classList.add('hidden');
+            if (this._isReadOnly) {
+                imageCount.textContent = `0 hình ảnh`;
+                previewContainer.style.display = 'block'; // Keep visible in readonly mode
+                imageGrid.innerHTML = '<div class="no-images-message">Không có hình ảnh nào</div>';
+            } else {
+                imageCount.textContent = `0 hình ảnh`;
+                previewContainer.classList.add('hidden');
+            }
             return;
         }
 
-        imageCount.textContent = `${totalCount} hình ảnh (${this._existingImages.length} đã lưu, ${this._selectedImages.length} mới)`;
-        previewContainer.classList.remove('hidden');
+        if (this._isReadOnly) {
+            imageCount.textContent = `${this._existingImages.length} hình ảnh`;
+            previewContainer.style.display = 'block';
+        } else {
+            imageCount.textContent = `${totalCount} hình ảnh (${this._existingImages.length} đã lưu, ${this._selectedImages.length} mới)`;
+            previewContainer.classList.remove('hidden');
+        }
+        
         imageGrid.innerHTML = '';
 
         // Display existing images from Dataverse
         this._existingImages.forEach((record, index) => {
             const imageItem = document.createElement('div');
-            imageItem.className = 'image-item existing-image';
+            imageItem.className = this._isReadOnly ? 'image-item existing-image readonly-item' : 'image-item existing-image';
+            
+            const readonlyNoteHtml = this._isReadOnly ? 
+                `<div class="image-note-readonly">${record.crdfd_notes || 'Không có ghi chú'}</div>` :
+                `<textarea class="image-note" placeholder="Nhập ghi chú..." data-existing-id="${record.crdfd_multiimagesid}">${record.crdfd_notes || ''}</textarea>`;
+            
+            const removeButtonHtml = this._isReadOnly ? '' : 
+                `<button class="remove-image existing" data-existing-id="${record.crdfd_multiimagesid}">×</button>`;
+
             imageItem.innerHTML = `
                 <img src="" alt="Preview" class="image-preview">
                 <div class="image-info">
                     <div class="image-name">${record.crdfd_image_name || `Image_${index + 1}`}</div>
-                    <div class="image-size">Đã lưu trong Dataverse</div>
-                    <textarea class="image-note" placeholder="Nhập ghi chú..." data-existing-id="${record.crdfd_multiimagesid}">${record.crdfd_notes || ''}</textarea>
+                    <div class="image-size">${this._isReadOnly ? 'Chế độ xem' : 'Đã lưu trong Dataverse'}</div>
+                    ${readonlyNoteHtml}
                 </div>
-                <button class="remove-image existing" data-existing-id="${record.crdfd_multiimagesid}">×</button>
+                ${removeButtonHtml}
             `;
 
             // Load image if available
@@ -725,7 +807,7 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
                 // For Dataverse images, we might need to make another call or use the image data directly
                 this.loadDataverseImage(record.crdfd_multiimagesid, imgElement);
                 
-                // Add click handler to open full size image
+                // Add click handler to open full size image (always allow viewing)
                 imgElement.addEventListener('click', (e) => {
                     e.stopPropagation();
                     this.openImagePreview(record.crdfd_multiimagesid);
@@ -740,29 +822,38 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
                 }
             }
 
-            // Add remove button event listener for existing image
-            const removeBtn = imageItem.querySelector('.remove-image') as HTMLButtonElement;
-            removeBtn.addEventListener('click', () => {
-                this.removeExistingImage(record.crdfd_multiimagesid, index);
-            });
+            // Only add interactive functionality if not readonly
+            if (!this._isReadOnly) {
+                // Add remove button event listener for existing image
+                const removeBtn = imageItem.querySelector('.remove-image') as HTMLButtonElement;
+                if (removeBtn) {
+                    removeBtn.addEventListener('click', () => {
+                        this.removeExistingImage(record.crdfd_multiimagesid, index);
+                    });
+                }
 
-            // Add note textarea event listener for existing image
-            const noteTextarea = imageItem.querySelector('.image-note') as HTMLTextAreaElement;
-            noteTextarea.addEventListener('input', (e) => {
-                const target = e.target as HTMLTextAreaElement;
-                this.debouncedUpdateExistingImageNote(record.crdfd_multiimagesid, target.value);
-            });
+                // Add note textarea event listener for existing image
+                const noteTextarea = imageItem.querySelector('.image-note') as HTMLTextAreaElement;
+                if (noteTextarea) {
+                    noteTextarea.addEventListener('input', (e) => {
+                        const target = e.target as HTMLTextAreaElement;
+                        this.debouncedUpdateExistingImageNote(record.crdfd_multiimagesid, target.value);
+                    });
 
-            // Prevent event bubbling
-            noteTextarea.addEventListener('click', (e) => {
-                e.stopPropagation();
-            });
+                    // Prevent event bubbling
+                    noteTextarea.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                    });
+                }
+            }
 
             imageGrid.appendChild(imageItem);
         });
 
-        // Display new selected images
-        this.displayNewImages();
+        // Display new selected images only if not readonly
+        if (!this._isReadOnly) {
+            this.displayNewImages();
+        }
     }
 
     /**
@@ -1962,6 +2053,68 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
     }
 
     /**
+     * Check if the component is in read-only mode
+     */
+    private checkReadOnlyState(context: ComponentFramework.Context<IInputs>): boolean {
+        try {
+            // Method 1: Check if the control is disabled via context mode
+            if (context.mode.isControlDisabled) {
+                return true;
+            }
+
+            // Method 2: Check if the keyDataField has security restrictions
+            if (context.parameters.keyDataField) {
+                const keyDataFieldParameter = context.parameters.keyDataField as ComponentFramework.PropertyTypes.Property & {
+                    security?: {
+                        editable?: boolean;
+                        readable?: boolean;
+                    };
+                };
+                
+                if (keyDataFieldParameter.security) {
+                    // Check if the field is read-only or user doesn't have update permission
+                    if (!keyDataFieldParameter.security.editable || keyDataFieldParameter.security.readable === false) {
+                        return true;
+                    }
+                }
+            }
+
+            // Method 3: Check if the form/page is in read-only mode
+            if (context.mode.isVisible === false) {
+                return true;
+            }
+
+            // Method 4: Check if running in Power Apps that might have form-level readonly restrictions
+            if (typeof window !== 'undefined' && window.location) {
+                const url = window.location.href.toLowerCase();
+                // Check for readonly indicators in URL or form mode
+                if (url.includes('readonly=true') || url.includes('formmode=readonly') || url.includes('mode=readonly')) {
+                    return true;
+                }
+            }
+
+            // Method 5: Check context properties for any readonly indicators
+            const contextMode = context.mode as ComponentFramework.Mode & { 
+                contextInfo?: { 
+                    isReadOnly?: boolean;
+                    formFactor?: string;
+                };
+            };
+            
+            if (contextMode.contextInfo && contextMode.contextInfo.isReadOnly) {
+                return true;
+            }
+
+            return false;
+
+        } catch (error) {
+            console.warn('Could not determine read-only state:', error);
+            // Default to false (allow editing) if unable to determine
+            return false;
+        }
+    }
+
+    /**
      * Gets the environment base URL
      */
     private getEnvironmentBaseUrl(): string {
@@ -1996,6 +2149,12 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
      * Add save all button functionality
      */
     private async saveAllImages(): Promise<void> {
+        // Check if component is in readonly mode
+        if (this._isReadOnly) {
+            this.updateStatus('Không thể lưu hình ảnh trong chế độ chỉ đọc', 'error');
+            return;
+        }
+
         if (this._selectedImages.length === 0) {
             this.updateStatus('Không có hình ảnh mới để lưu', 'info');
             return;
