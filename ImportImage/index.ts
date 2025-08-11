@@ -10,6 +10,10 @@ interface DataverseImageRecord {
 }
 
 export class ImportImage implements ComponentFramework.StandardControl<IInputs, IOutputs> {
+    // Constants for file validation
+    private static readonly MAX_FILE_SIZE_KB = 10240; // 10 MB in KB
+    private static readonly MAX_FILE_SIZE_BYTES = ImportImage.MAX_FILE_SIZE_KB * 1024; // 10 MB in bytes
+    
     private _container: HTMLDivElement;
     private _context: ComponentFramework.Context<IInputs>;
     private _notifyOutputChanged: () => void;
@@ -92,6 +96,11 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
                 // Try to extract table name from entity metadata or context
                 this._tableName = this.getTableNameFromContext(context);
                 
+                this.loadExistingImages();
+            }
+            // If readonly state changed from readonly to writable, reload images to show editing capabilities
+            else if (readOnlyStateChanged && !isReadOnly && hasKeyData) {
+                this._tableName = this.getTableNameFromContext(context);
                 this.loadExistingImages();
             }
         } else {
@@ -178,6 +187,7 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
                 <div class="file-icon">📂</div>
                 <div class="upload-text">Chọn hoặc paste hình ảnh</div>
                 <div class="upload-hint">Kéo thả hình vào đây, click để chọn nhiều hình, hoặc Ctrl+V để paste</div>
+                <div class="upload-limit">📏 Giới hạn: ${ImportImage.MAX_FILE_SIZE_KB / 1024}MB mỗi hình ảnh</div>
                 <input type="file" id="fileInput" class="hidden" accept=".png,.jpg,.jpeg,.gif,.bmp,.webp" multiple>
                 <div id="previewContainer" class="preview-container hidden">
                     <div class="preview-header">
@@ -363,6 +373,13 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             if (item.type.indexOf('image') !== -1) {
                 const file = item.getAsFile();
                 if (file) {
+                    // Validate the pasted file
+                    const validation = this.validateImageFile(file);
+                    if (!validation.valid) {
+                        this.updateStatus(`Paste thất bại: ${validation.error}`, 'error');
+                        return;
+                    }
+                    
                     this.addImages([file]);
                     this.updateStatus('Hình ảnh đã được paste thành công', 'success');
                     return;
@@ -386,23 +403,72 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
     }
 
     /**
+     * Validates image file for size and type
+     */
+    private validateImageFile(file: File): { valid: boolean; error?: string } {
+        // Check if it's an image file
+        if (!file.type.startsWith('image/')) {
+            return { valid: false, error: 'File không phải là hình ảnh' };
+        }
+
+        // Check file size
+        if (file.size > ImportImage.MAX_FILE_SIZE_BYTES) {
+            return { 
+                valid: false, 
+                error: `File quá lớn (${this.formatFileSize(file.size)}). Tối đa cho phép: ${ImportImage.MAX_FILE_SIZE_KB / 1024}MB` 
+            };
+        }
+
+        // Check for empty files
+        if (file.size === 0) {
+            return { valid: false, error: 'File rỗng không được phép' };
+        }
+
+        return { valid: true };
+    }
+
+    /**
      * Adds images to the selection
      */
     private addImages(files: File[]): void {
-        const imageFiles = files.filter(file => file.type.startsWith('image/'));
+        const validFiles: File[] = [];
+        const errors: string[] = [];
         
-        if (imageFiles.length === 0) {
-            this.updateStatus('Vui lòng chỉ chọn các file hình ảnh', 'error');
-            return;
+        // Validate each file
+        for (const file of files) {
+            const validation = this.validateImageFile(file);
+            if (validation.valid) {
+                validFiles.push(file);
+            } else {
+                errors.push(`${file.name}: ${validation.error}`);
+            }
         }
 
-        // Add new images to existing selection
-        this._selectedImages.push(...imageFiles);
+        // Show errors if any
+        if (errors.length > 0) {
+            const errorMessage = errors.length === 1 
+                ? errors[0]
+                : `${errors.length} file có lỗi:\n${errors.join('\n')}`;
+            this.updateStatus(errorMessage, 'error');
+            
+            // If no valid files, return early
+            if (validFiles.length === 0) {
+                return;
+            }
+        }
+
+        // Add valid files to selection
+        this._selectedImages.push(...validFiles);
         this.updateImageDisplay();
         this.processImages();
         
-        const newCount = imageFiles.length;
-        this.updateStatus(`Đã thêm ${newCount} hình ảnh`, 'success');
+        // Show success message
+        if (validFiles.length > 0) {
+            const successMessage = errors.length > 0
+                ? `Đã thêm ${validFiles.length} hình ảnh hợp lệ, bỏ qua ${errors.length} file có lỗi`
+                : `Đã thêm ${validFiles.length} hình ảnh`;
+            this.updateStatus(successMessage, 'success');
+        }
     }
 
     /**
