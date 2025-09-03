@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <manifest>
-  <control namespace="CustomComponent" constructor="ImportFile" version="0.0.1" display-name-key="ImportFile" description-key="ImportFile description" control-type="standard" >
+  <control namespace="CustomComponent" constructor="ImportImage" version="0.0.1" display-name-key="ImportImage" description-key="ImportImage description" control-type="standard" >
+    <type-group name="fieldTypes">
+      <type>SingleLine.Text</type>
+    </type-group>
     <!--external-service-usage node declares whether this 3rd party PCF control is using external service or not, if yes, this control will be considered as premium and please also add the external domain it is using.
     If it is not using any external service, please set the enabled="false" and DO NOT add any domain below. The "enabled" will be false by default.
     Example1:
@@ -18,9 +21,12 @@
       -->
     </external-service-usage>
     <!-- property node identifies a specific, configurable piece of data that the control expects from CDS -->
+    <property name="keyDataField" display-name-key="Key Data Field" description-key="Field containing the key data for filtering (e.g., crdfd_name)" of-type-group="fieldTypes" usage="bound" required="true" />
     <property name="fileName" display-name-key="File Name" description-key="Output file name" of-type="SingleLine.Text" usage="output" required="false" />
     <property name="fileContent" display-name-key="File Content" description-key="Output file content as base64" of-type="Multiple" usage="output" required="false" />
     <property name="uploadStatus" display-name-key="Upload Status" description-key="Status of file upload" of-type="SingleLine.Text" usage="output" required="false" />
+    <property name="imagesList" display-name-key="Images List" description-key="JSON array of selected images" of-type="Multiple" usage="output" required="false" />
+    <property name="imagesCount" display-name-key="Images Count" description-key="Number of selected images" of-type="Whole.None" usage="output" required="false" />
     <!--
       Property node's of-type attribute can be of-type-group attribute.
       Example:
@@ -43,6 +49,7 @@
     <feature-usage>
       <uses-feature name="Device.pickFile" required="true" />
       <uses-feature name="Utility" required="true" />
+      <uses-feature name="WebAPI" required="true" />
     </feature-usage>
   </control>
 </manifest>

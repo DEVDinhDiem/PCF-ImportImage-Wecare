@@ -1,0 +1,2271 @@
+import { IInputs, IOutputs } from "./generated/ManifestTypes";
+
+interface DataverseImageRecord {
+    crdfd_multiimagesid: string;
+    crdfd_image_name?: string;
+    crdfd_notes?: string;
+    crdfd_image?: string;
+    crdfd_key_data?: string;
+    crdfd_table?: string;
+}
+
+export class ImportImage implements ComponentFramework.StandardControl<IInputs, IOutputs> {
+    // Constants for file validation
+    private static readonly MAX_FILE_SIZE_KB = 10240; // 10 MB in KB
+    private static readonly MAX_FILE_SIZE_BYTES = ImportImage.MAX_FILE_SIZE_KB * 1024; // 10 MB in bytes
+    
+    private _container: HTMLDivElement;
+    private _context: ComponentFramework.Context<IInputs>;
+    private _notifyOutputChanged: () => void;
+    private _fileInput: HTMLInputElement;
+    private _selectedImages: File[] = [];
+    private _imageNotes: string[] = [];
+    private _fileName = "";
+    private _fileContent = "";
+    private _uploadStatus = "";
+    private _imagesList = "";
+    private _imagesCount = 0;
+    private _keyDataValue = "";
+    private _existingImages: DataverseImageRecord[] = [];
+    private _tableName = ""; // Store table name for crdfd_table field
+    private _debounceTimers = new Map<string, NodeJS.Timeout>(); // For debouncing note updates
+    private _isReadOnly = false; // Track if the component is in read-only mode
+
+    /**
+     * Empty constructor.
+     */
+    constructor() {
+        // Empty
+    }
+
+    /**
+     * Used to initialize the control instance. Controls can kick off remote server calls and other initialization actions here.
+     * Data-set values are not initialized here, use updateView.
+     * @param context The entire property bag available to control via Context Object; It contains values as set up by the customizer mapped to property names defined in the manifest, as well as utility functions.
+     * @param notifyOutputChanged A callback method to alert the framework that the control has new outputs ready to be retrieved asynchronously.
+     * @param state A piece of data that persists in one session for a single user. Can be set at any point in a controls life cycle by calling 'setControlState' in the Mode interface.
+     * @param container If a control is marked control-type='standard', it will receive an empty div element within which it can render its content.
+     */
+    public init(
+        context: ComponentFramework.Context<IInputs>,
+        notifyOutputChanged: () => void,
+        state: ComponentFramework.Dictionary,
+        container: HTMLDivElement
+    ): void {
+        this._context = context;
+        this._container = container;
+        this._notifyOutputChanged = notifyOutputChanged;
+        
+        this.createFileUploadInterface();
+        this.setupEventListeners();
+    }
+
+
+    /**
+     * Called when any value in the property bag has changed. This includes field values, data-sets, global values such as container height and width, offline status, control metadata values such as label, visible, etc.
+     * @param context The entire property bag available to control via Context Object; It contains values as set up by the customizer mapped to names defined in the manifest, as well as utility functions
+     */
+    public updateView(context: ComponentFramework.Context<IInputs>): void {
+        this._context = context;
+        
+        // Check if the component is in read-only mode
+        const isReadOnly = this.checkReadOnlyState(context);
+        const readOnlyStateChanged = this._isReadOnly !== isReadOnly;
+        this._isReadOnly = isReadOnly;
+        
+        // Get key data value for filtering
+        const newKeyDataValue = context.parameters.keyDataField && context.parameters.keyDataField.raw;
+        const hasKeyDataChanged = this._keyDataValue !== newKeyDataValue;
+        
+        // Check if interface needs to be recreated based on key data availability or readonly state
+        const hadKeyData = !!this._keyDataValue;
+        const hasKeyData = !!newKeyDataValue;
+        const keyDataStatusChanged = hadKeyData !== hasKeyData;
+        
+        if (keyDataStatusChanged || readOnlyStateChanged) {
+            // Recreate interface when key data status or readonly state changes
+            this.createFileUploadInterface();
+            this.setupEventListeners();
+        }
+        
+        if (newKeyDataValue) {
+            this._keyDataValue = newKeyDataValue;
+            
+            // If key data changed and we have data, reload images
+            if (hasKeyDataChanged && hasKeyData) {
+                // Try to extract table name from entity metadata or context
+                this._tableName = this.getTableNameFromContext(context);
+                
+                this.loadExistingImages();
+            }
+            // If readonly state changed from readonly to writable, reload images to show editing capabilities
+            else if (readOnlyStateChanged && !isReadOnly && hasKeyData) {
+                this._tableName = this.getTableNameFromContext(context);
+                this.loadExistingImages();
+            }
+        } else {
+            // Clear key data when not available
+            this._keyDataValue = "";
+        }
+    }
+
+    /**
+     * It is called by the framework prior to a control receiving new data.
+     * @returns an object based on nomenclature defined in manifest, expecting object[s] for property marked as "bound" or "output"
+     */
+    public getOutputs(): IOutputs {
+        return {
+            keyDataField: this._keyDataValue,
+            fileName: this._fileName,
+            fileContent: this._fileContent,
+            uploadStatus: this._uploadStatus,
+            imagesList: this._imagesList,
+            imagesCount: this._imagesCount
+        };
+    }
+
+    /**
+     * Called when the control is to be removed from the DOM tree. Controls should use this call for cleanup.
+     * i.e. cancelling any pending remote calls, removing listeners, etc.
+     */
+    public destroy(): void {
+        if (this._fileInput) {
+            this._fileInput.removeEventListener('change', this.onFileSelected.bind(this));
+        }
+
+        // Clear all debounce timers
+        this._debounceTimers.forEach(timer => clearTimeout(timer));
+        this._debounceTimers.clear();
+    }
+
+    /**
+     * Creates the file upload interface
+     */
+    private createFileUploadInterface(): void {
+        // Check if keyDataField has value
+        const hasKeyData = this._context.parameters.keyDataField && this._context.parameters.keyDataField.raw;
+        
+        if (!hasKeyData) {
+            // Show save record message when no key data
+            this._container.innerHTML = `
+                <div class="import-file-container save-required" id="dropZone" tabindex="0">
+                    <div class="file-icon">💾</div>
+                    <div class="upload-text">Vui lòng lưu record trước</div>
+                    <div class="upload-hint">Bạn cần save/lưu record này trước khi có thể import hình ảnh</div>
+                    <div class="status-message status-info">
+                        ⚠️ Không thể import hình ảnh vào record chưa được lưu
+                    </div>
+                </div>
+            `;
+            return;
+        }
+
+        // Check if component is in read-only mode
+        if (this._isReadOnly) {
+            // Show read-only interface - only allow viewing images
+            this._container.innerHTML = `
+                <div class="import-file-container readonly-mode" id="dropZone" tabindex="0">
+                    <div class="file-icon">👁️</div>
+                    <div class="upload-text">Chế độ xem</div>
+                    <div class="upload-hint">Field bị khóa - Chỉ có thể xem hình ảnh, không thể chỉnh sửa</div>
+                    <div id="previewContainer" class="preview-container">
+                        <div class="preview-header readonly-header">
+                            <span id="imageCount">0 hình ảnh</span>
+                            <div class="readonly-indicator">🔒 Chỉ đọc</div>
+                        </div>
+                        <div id="imageGrid" class="image-grid readonly-grid"></div>
+                    </div>
+                    <div id="statusMessage" class="status-message hidden"></div>
+                </div>
+            `;
+            return;
+        }
+
+        // Normal file upload interface when key data exists and not readonly
+        this._container.innerHTML = `
+            <div class="import-file-container" id="dropZone" tabindex="0">
+                <div class="file-icon">📂</div>
+                <div class="upload-text">Chọn hoặc paste hình ảnh</div>
+                <div class="upload-hint">Kéo thả hình vào đây, click để chọn nhiều hình, hoặc Ctrl+V để paste</div>
+                <div class="upload-limit">📏 Giới hạn: ${ImportImage.MAX_FILE_SIZE_KB / 1024}MB mỗi hình ảnh</div>
+                <input type="file" id="fileInput" class="hidden" accept=".png,.jpg,.jpeg,.gif,.bmp,.webp" multiple>
+                <div id="previewContainer" class="preview-container hidden">
+                    <div class="preview-header">
+                        <span id="imageCount">0 hình ảnh đã chọn</span>
+                        <div class="action-buttons">
+                            <button id="saveAll" class="save-all-button">💾 Lưu tất cả</button>
+                            <button id="clearAll" class="clear-button">🗑️ Xóa tất cả</button>
+                        </div>
+                    </div>
+                    <div id="imageGrid" class="image-grid"></div>
+                </div>
+                <div id="statusMessage" class="status-message hidden"></div>
+            </div>
+        `;
+
+        this._fileInput = this._container.querySelector('#fileInput') as HTMLInputElement;
+    }
+
+    /**
+     * Sets up event listeners for the file upload interface
+     */
+    private setupEventListeners(): void {
+        const dropZone = this._container.querySelector('#dropZone') as HTMLDivElement;
+
+        // Check if we have key data and not in readonly mode before setting up interactive event listeners
+        const hasKeyData = this._context.parameters.keyDataField && this._context.parameters.keyDataField.raw;
+        
+        if (!hasKeyData) {
+            // Only set up basic focus for save-required state
+            dropZone.addEventListener('click', () => {
+                this.updateStatus('Vui lòng lưu record trước khi import hình ảnh', 'error');
+            });
+            return;
+        }
+
+        if (this._isReadOnly) {
+            // In readonly mode, only allow viewing images - no editing functionality
+            this.updateStatus('Chế độ chỉ đọc - Không thể chỉnh sửa hình ảnh', 'info');
+            // Load existing images for viewing only
+            if (hasKeyData) {
+                this.loadExistingImages();
+            }
+            return;
+        }
+
+        // Normal interactive mode - full functionality
+        // Click to open file dialog
+        dropZone.addEventListener('click', (e) => {
+            // Don't open file dialog if clicking on buttons or interactive elements
+            const target = e.target as HTMLElement;
+            if (target.classList.contains('clear-button') || 
+                target.classList.contains('save-all-button') ||
+                target.classList.contains('save-image') ||
+                target.classList.contains('image-item') || 
+                target.classList.contains('remove-image') ||
+                target.classList.contains('image-note') ||
+                target.classList.contains('image-info') ||
+                target.classList.contains('image-preview') ||
+                target.classList.contains('image-name') ||
+                target.classList.contains('image-size') ||
+                target.classList.contains('action-buttons')) {
+                return;
+            }
+            this._fileInput.click();
+        });
+
+        // File selection
+        this._fileInput.addEventListener('change', this.onFileSelected.bind(this));
+
+        // Drag and drop events
+        dropZone.addEventListener('dragover', this.onDragOver.bind(this));
+        dropZone.addEventListener('dragleave', this.onDragLeave.bind(this));
+        dropZone.addEventListener('drop', this.onDrop.bind(this));
+
+        // Paste events
+        dropZone.addEventListener('paste', this.onPaste.bind(this));
+        dropZone.addEventListener('keydown', this.onKeyDown.bind(this));
+        
+        // Focus to enable paste functionality
+        dropZone.focus();
+
+        // Clear all button
+        const clearAllBtn = this._container.querySelector('#clearAll') as HTMLButtonElement;
+        if (clearAllBtn) {
+            clearAllBtn.addEventListener('click', this.clearAllImages.bind(this));
+        }
+
+        // Save all button
+        const saveAllBtn = this._container.querySelector('#saveAll') as HTMLButtonElement;
+        if (saveAllBtn) {
+            saveAllBtn.addEventListener('click', this.saveAllImages.bind(this));
+        }
+    }
+
+    /**
+     * Handles file selection
+     */
+    private onFileSelected(event: Event): void {
+        // Check if we have key data before processing
+        if (!this._keyDataValue) {
+            this.updateStatus('Vui lòng lưu record trước khi import hình ảnh', 'error');
+            return;
+        }
+
+        // Check if component is in readonly mode
+        if (this._isReadOnly) {
+            this.updateStatus('Không thể chọn file trong chế độ chỉ đọc', 'error');
+            return;
+        }
+
+        const input = event.target as HTMLInputElement;
+        if (input.files && input.files.length > 0) {
+            this.addImages(Array.from(input.files));
+        }
+    }
+
+    /**
+     * Handles drag over event
+     */
+    private onDragOver(event: DragEvent): void {
+        event.preventDefault();
+        const dropZone = this._container.querySelector('#dropZone') as HTMLDivElement;
+        dropZone.classList.add('dragging');
+    }
+
+    /**
+     * Handles drag leave event
+     */
+    private onDragLeave(event: DragEvent): void {
+        event.preventDefault();
+        const dropZone = this._container.querySelector('#dropZone') as HTMLDivElement;
+        dropZone.classList.remove('dragging');
+    }
+
+    /**
+     * Handles drop event
+     */
+    private onDrop(event: DragEvent): void {
+        event.preventDefault();
+        const dropZone = this._container.querySelector('#dropZone') as HTMLDivElement;
+        dropZone.classList.remove('dragging');
+
+        // Check if we have key data before processing
+        if (!this._keyDataValue) {
+            this.updateStatus('Vui lòng lưu record trước khi import hình ảnh', 'error');
+            return;
+        }
+
+        // Check if component is in readonly mode
+        if (this._isReadOnly) {
+            this.updateStatus('Không thể kéo thả file trong chế độ chỉ đọc', 'error');
+            return;
+        }
+
+        if (event.dataTransfer && event.dataTransfer.files.length > 0) {
+            this.addImages(Array.from(event.dataTransfer.files));
+        }
+    }
+
+    /**
+     * Handles paste event for images from clipboard
+     */
+    private onPaste(event: ClipboardEvent): void {
+        event.preventDefault();
+        
+        // Check if we have key data before processing
+        if (!this._keyDataValue) {
+            this.updateStatus('Vui lòng lưu record trước khi import hình ảnh', 'error');
+            return;
+        }
+
+        // Check if component is in readonly mode
+        if (this._isReadOnly) {
+            this.updateStatus('Không thể paste hình ảnh trong chế độ chỉ đọc', 'error');
+            return;
+        }
+        
+        if (!event.clipboardData) return;
+
+        const items = Array.from(event.clipboardData.items);
+        for (const item of items) {
+            // Check if the item is an image
+            if (item.type.indexOf('image') !== -1) {
+                const file = item.getAsFile();
+                if (file) {
+                    // Validate the pasted file
+                    const validation = this.validateImageFile(file);
+                    if (!validation.valid) {
+                        this.updateStatus(`Paste thất bại: ${validation.error}`, 'error');
+                        return;
+                    }
+                    
+                    this.addImages([file]);
+                    this.updateStatus('Hình ảnh đã được paste thành công', 'success');
+                    return;
+                }
+            }
+        }
+        
+        // If no image found in clipboard
+        this.updateStatus('Không tìm thấy hình ảnh trong clipboard', 'error');
+    }
+
+    /**
+     * Handles keyboard events
+     */
+    private onKeyDown(event: KeyboardEvent): void {
+        // Focus back to container if user clicks elsewhere
+        if (event.ctrlKey && event.key === 'v') {
+            // Paste will be handled by onPaste event
+            this.updateStatus('Đang kiểm tra clipboard...', 'info');
+        }
+    }
+
+    /**
+     * Validates image file for size and type
+     */
+    private validateImageFile(file: File): { valid: boolean; error?: string } {
+        // Check if it's an image file
+        if (!file.type.startsWith('image/')) {
+            return { valid: false, error: 'File không phải là hình ảnh' };
+        }
+
+        // Check file size
+        if (file.size > ImportImage.MAX_FILE_SIZE_BYTES) {
+            return { 
+                valid: false, 
+                error: `File quá lớn (${this.formatFileSize(file.size)}). Tối đa cho phép: ${ImportImage.MAX_FILE_SIZE_KB / 1024}MB` 
+            };
+        }
+
+        // Check for empty files
+        if (file.size === 0) {
+            return { valid: false, error: 'File rỗng không được phép' };
+        }
+
+        return { valid: true };
+    }
+
+    /**
+     * Adds images to the selection
+     */
+    private addImages(files: File[]): void {
+        const validFiles: File[] = [];
+        const errors: string[] = [];
+        
+        // Validate each file
+        for (const file of files) {
+            const validation = this.validateImageFile(file);
+            if (validation.valid) {
+                validFiles.push(file);
+            } else {
+                errors.push(`${file.name}: ${validation.error}`);
+            }
+        }
+
+        // Show errors if any
+        if (errors.length > 0) {
+            const errorMessage = errors.length === 1 
+                ? errors[0]
+                : `${errors.length} file có lỗi:\n${errors.join('\n')}`;
+            this.updateStatus(errorMessage, 'error');
+            
+            // If no valid files, return early
+            if (validFiles.length === 0) {
+                return;
+            }
+        }
+
+        // Add valid files to selection
+        this._selectedImages.push(...validFiles);
+        this.updateImageDisplay();
+        this.processImages();
+        
+        // Show success message
+        if (validFiles.length > 0) {
+            const successMessage = errors.length > 0
+                ? `Đã thêm ${validFiles.length} hình ảnh hợp lệ, bỏ qua ${errors.length} file có lỗi`
+                : `Đã thêm ${validFiles.length} hình ảnh`;
+            this.updateStatus(successMessage, 'success');
+        }
+    }
+
+    /**
+     * Updates the image display grid
+     */
+    private updateImageDisplay(): void {
+        // If we have existing images loaded, use the new display method
+        if (this._existingImages.length > 0 || this._keyDataValue) {
+            this.displayExistingImages();
+            return;
+        }
+
+        // Fallback to original display for Canvas apps or when no key data
+        const previewContainer = this._container.querySelector('#previewContainer') as HTMLDivElement;
+        const imageGrid = this._container.querySelector('#imageGrid') as HTMLDivElement;
+        const imageCount = this._container.querySelector('#imageCount') as HTMLSpanElement;
+
+        // Update count
+        this._imagesCount = this._selectedImages.length;
+        imageCount.textContent = `${this._imagesCount} hình ảnh đã chọn`;
+
+        if (this._imagesCount === 0) {
+            previewContainer.classList.add('hidden');
+            return;
+        }
+
+        previewContainer.classList.remove('hidden');
+        imageGrid.innerHTML = '';
+
+        // Create preview for each image
+        this._selectedImages.forEach((file, index) => {
+            const imageItem = document.createElement('div');
+            imageItem.className = 'image-item new-image';
+            imageItem.innerHTML = `
+                <img src="" alt="Preview" class="image-preview">
+                <div class="image-info">
+                    <div class="image-name">${file.name || `Pasted_Image_${index + 1}.${this.getImageExtension(file.type)}`}</div>
+                    <div class="image-size">${this.formatFileSize(file.size)}</div>
+                    <textarea class="image-note" placeholder="Nhập ghi chú..." data-index="${index}"></textarea>
+                </div>
+                <button class="remove-image" data-index="${index}">×</button>
+            `;
+
+            // Create preview image
+            const reader = new FileReader();
+            const imgElement = imageItem.querySelector('.image-preview') as HTMLImageElement;
+            reader.onload = (e) => {
+                if (e.target && e.target.result) {
+                    imgElement.src = e.target.result as string;
+                }
+            };
+            reader.readAsDataURL(file);
+
+            // Add remove button event listener
+            const removeBtn = imageItem.querySelector('.remove-image') as HTMLButtonElement;
+            removeBtn.addEventListener('click', () => {
+                this.removeImage(index);
+            });
+
+            // Add note textarea event listener
+            const noteTextarea = imageItem.querySelector('.image-note') as HTMLTextAreaElement;
+            noteTextarea.addEventListener('input', (e) => {
+                const target = e.target as HTMLTextAreaElement;
+                this.debouncedUpdateImageNote(index, target.value);
+            });
+
+            // Prevent event bubbling when clicking on textarea
+            noteTextarea.addEventListener('click', (e) => {
+                e.stopPropagation();
+            });
+
+            // Load existing note if any
+            const existingNote = this.getImageNote(index);
+            if (existingNote) {
+                noteTextarea.value = existingNote;
+            }
+
+            imageGrid.appendChild(imageItem);
+        });
+    }
+
+    /**
+     * Removes an image from selection
+     */
+    private removeImage(index: number): void {
+        this._selectedImages.splice(index, 1);
+        this._imageNotes.splice(index, 1); // Remove corresponding note
+        this.updateImageDisplay();
+        this.processImages();
+        this.updateStatus('Đã xóa hình ảnh', 'info');
+    }
+
+    /**
+     * Updates note for a specific image with debouncing
+     */
+    private debouncedUpdateImageNote(index: number, note: string): void {
+        // Clear existing timer for this image index
+        const timerKey = `new_${index}`;
+        const existingTimer = this._debounceTimers.get(timerKey);
+        if (existingTimer) {
+            clearTimeout(existingTimer);
+        }
+
+        // Set new timer
+        const timer = setTimeout(() => {
+            this.updateImageNote(index, note);
+            this._debounceTimers.delete(timerKey);
+        }, 500); // Shorter delay for new images since no API call
+
+        this._debounceTimers.set(timerKey, timer);
+
+        // Update local data immediately for responsive UI
+        while (this._imageNotes.length <= index) {
+            this._imageNotes.push('');
+        }
+        this._imageNotes[index] = note;
+    }
+
+    /**
+     * Updates note for a specific image
+     */
+    private updateImageNote(index: number, note: string): void {
+        // Ensure array is large enough
+        while (this._imageNotes.length <= index) {
+            this._imageNotes.push('');
+        }
+        this._imageNotes[index] = note;
+        
+        // Re-process images to update output with new note
+        this.processImages();
+    }
+
+    /**
+     * Gets note for a specific image
+     */
+    private getImageNote(index: number): string {
+        return this._imageNotes[index] || '';
+    }
+
+    /**
+     * Clears all selected images
+     */
+    private async clearAllImages(): Promise<void> {
+        // Check if component is in readonly mode
+        if (this._isReadOnly) {
+            this.updateStatus('Không thể xóa hình ảnh trong chế độ chỉ đọc', 'error');
+            return;
+        }
+
+        const hasNewImages = this._selectedImages.length > 0;
+        const hasExistingImages = this._existingImages.length > 0;
+        
+        let confirmMessage = '';
+        if (hasNewImages && hasExistingImages) {
+            confirmMessage = `Bạn có chắc muốn xóa tất cả ${this._selectedImages.length} hình ảnh chưa lưu và ${this._existingImages.length} hình ảnh đã lưu trong Dataverse?`;
+        } else if (hasNewImages) {
+            confirmMessage = `Bạn có chắc muốn xóa tất cả ${this._selectedImages.length} hình ảnh chưa lưu?`;
+        } else if (hasExistingImages) {
+            confirmMessage = `Bạn có chắc muốn xóa tất cả ${this._existingImages.length} hình ảnh đã lưu trong Dataverse?`;
+        } else {
+            this.updateStatus('Không có hình ảnh nào để xóa', 'info');
+            return;
+        }
+
+        if (!confirm(confirmMessage)) {
+            return;
+        }
+
+        try {
+            this.updateStatus('Đang xóa tất cả hình ảnh...', 'info');
+
+            // Delete all existing images from Dataverse
+            if (hasExistingImages) {
+                for (const image of this._existingImages) {
+                    await this._context.webAPI.deleteRecord("crdfd_multiimages", image.crdfd_multiimagesid);
+                }
+            }
+
+            // Clear local arrays
+            this._selectedImages = [];
+            this._imageNotes = [];
+            this._existingImages = [];
+            this._fileName = "";
+            this._fileContent = "";
+            this._imagesList = "";
+            this._imagesCount = 0;
+            
+            // Hide preview container
+            const previewContainer = this._container.querySelector('#previewContainer') as HTMLDivElement;
+            previewContainer.classList.add('hidden');
+            
+            this._notifyOutputChanged();
+            
+            const deletedCount = (hasNewImages ? this._selectedImages.length : 0) + (hasExistingImages ? this._existingImages.length : 0);
+            this.updateStatus(`Đã xóa thành công tất cả hình ảnh`, 'success');
+
+        } catch (error) {
+            console.error("Error clearing all images:", error);
+            this.updateStatus('Lỗi khi xóa hình ảnh', 'error');
+        }
+    }
+
+    /**
+     * Processes all images and creates output data
+     */
+    private processImages(): void {
+        if (this._selectedImages.length === 0) {
+            this._fileName = "";
+            this._fileContent = "";
+            this._imagesList = "";
+            this._imagesCount = 0;
+            this._uploadStatus = "";
+            this._notifyOutputChanged();
+            return;
+        }
+
+        interface ImageData {
+            name: string;
+            content: string;
+            size: number;
+            type: string;
+            index: number;
+            note: string;
+        }
+
+        const imageData: ImageData[] = [];
+        let processedCount = 0;
+
+        this._selectedImages.forEach((file, index) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                if (e.target && e.target.result) {
+                    const base64String = (e.target.result as string).split(',')[1];
+                    const fileName = file.name || `Pasted_Image_${index + 1}.${this.getImageExtension(file.type)}`;
+                    
+                    imageData.push({
+                        name: fileName,
+                        content: base64String,
+                        size: file.size,
+                        type: file.type,
+                        index: index,
+                        note: this.getImageNote(index)
+                    });
+
+                    processedCount++;
+                    
+                    // When all images are processed
+                    if (processedCount === this._selectedImages.length) {
+                        // Sort by index to maintain order
+                        imageData.sort((a, b) => a.index - b.index);
+                        
+                        // Set output values
+                        this._imagesList = JSON.stringify(imageData);
+                        this._imagesCount = imageData.length;
+                        
+                        // Set first image as main file for backward compatibility
+                        if (imageData.length > 0) {
+                            this._fileName = imageData[0].name;
+                            this._fileContent = imageData[0].content;
+                        }
+                        
+                        this._uploadStatus = 'ready';
+                        this._notifyOutputChanged();
+                    }
+                }
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+
+    /**
+     * Updates status message
+     */
+    private updateStatus(message: string, type: 'success' | 'error' | 'info'): void {
+        const statusElement = this._container.querySelector('#statusMessage') as HTMLDivElement;
+        statusElement.textContent = message;
+        statusElement.className = `status-message status-${type}`;
+        statusElement.classList.remove('hidden');
+    }
+
+    /**
+     * Formats file size for display
+     */
+    private formatFileSize(bytes: number): string {
+        if (bytes === 0) return '0 Bytes';
+        const k = 1024;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    /**
+     * Gets file extension based on MIME type for pasted images
+     */
+    private getImageExtension(mimeType: string): string {
+        const mimeToExt: Record<string, string> = {
+            'image/png': 'png',
+            'image/jpeg': 'jpg',
+            'image/jpg': 'jpg',
+            'image/gif': 'gif',
+            'image/bmp': 'bmp',
+            'image/webp': 'webp',
+            'image/svg+xml': 'svg'
+        };
+        return mimeToExt[mimeType] || 'png';
+    }
+
+    /**
+     * Load existing images from crdfd_multiimages table
+     */
+    private async loadExistingImages(): Promise<void> {
+        if (!this._keyDataValue || !this._context.webAPI) {
+            return;
+        }
+
+        try {
+            this.updateStatus('Đang tải hình ảnh có sẵn...', 'info');
+            
+            // Query crdfd_multiimages table with table name filter
+            let query = `?$filter=crdfd_key_data eq '${this._keyDataValue}'`;
+            if (this._tableName && this._tableName !== 'unknown_table') {
+                query += ` and crdfd_table eq '${this._tableName}'`;
+            }
+            query += `&$select=crdfd_multiimagesid,crdfd_image_name,crdfd_notes,crdfd_image,crdfd_table`;
+            
+            const result = await this._context.webAPI.retrieveMultipleRecords("crdfd_multiimages", query);
+            
+            this._existingImages = result.entities as DataverseImageRecord[];
+            this._imagesCount = this._existingImages.length;
+            
+            // Update display with existing images
+            this.displayExistingImages();
+            
+            this.updateStatus(`Đã tải ${this._imagesCount} hình ảnh`, 'success');
+            
+        } catch (error) {
+            console.error("Error loading existing images:", error);
+            this.updateStatus('Lỗi khi tải hình ảnh có sẵn', 'error');
+        }
+    }
+
+    /**
+     * Display existing images from Dataverse
+     */
+    private displayExistingImages(): void {
+        const previewContainer = this._container.querySelector('#previewContainer') as HTMLDivElement;
+        const imageGrid = this._container.querySelector('#imageGrid') as HTMLDivElement;
+        const imageCount = this._container.querySelector('#imageCount') as HTMLSpanElement;
+
+        // Calculate total count
+        const totalCount = this._existingImages.length + (this._isReadOnly ? 0 : this._selectedImages.length);
+        this._imagesCount = totalCount;
+
+        // Update count display
+        if (totalCount === 0) {
+            if (this._isReadOnly) {
+                imageCount.textContent = `0 hình ảnh`;
+                previewContainer.style.display = 'block'; // Keep visible in readonly mode
+                imageGrid.innerHTML = '<div class="no-images-message">Không có hình ảnh nào</div>';
+            } else {
+                imageCount.textContent = `0 hình ảnh`;
+                previewContainer.classList.add('hidden');
+            }
+            return;
+        }
+
+        if (this._isReadOnly) {
+            imageCount.textContent = `${this._existingImages.length} hình ảnh`;
+            previewContainer.style.display = 'block';
+        } else {
+            imageCount.textContent = `${totalCount} hình ảnh (${this._existingImages.length} đã lưu, ${this._selectedImages.length} mới)`;
+            previewContainer.classList.remove('hidden');
+        }
+        
+        imageGrid.innerHTML = '';
+
+        // Display existing images from Dataverse
+        this._existingImages.forEach((record, index) => {
+            const imageItem = document.createElement('div');
+            imageItem.className = this._isReadOnly ? 'image-item existing-image readonly-item' : 'image-item existing-image';
+            
+            const readonlyNoteHtml = this._isReadOnly ? 
+                `<div class="image-note-readonly">${record.crdfd_notes || 'Không có ghi chú'}</div>` :
+                `<textarea class="image-note" placeholder="Nhập ghi chú..." data-existing-id="${record.crdfd_multiimagesid}">${record.crdfd_notes || ''}</textarea>`;
+            
+            const removeButtonHtml = this._isReadOnly ? '' : 
+                `<button class="remove-image existing" data-existing-id="${record.crdfd_multiimagesid}">×</button>`;
+
+            imageItem.innerHTML = `
+                <img src="" alt="Preview" class="image-preview">
+                <div class="image-info">
+                    <div class="image-name">${record.crdfd_image_name || `Image_${index + 1}`}</div>
+                    <div class="image-size">${this._isReadOnly ? 'Chế độ xem' : 'Đã lưu trong Dataverse'}</div>
+                    ${readonlyNoteHtml}
+                </div>
+                ${removeButtonHtml}
+            `;
+
+            // Load image if available
+            if (record.crdfd_image) {
+                const imgElement = imageItem.querySelector('.image-preview') as HTMLImageElement;
+                // For Dataverse images, we might need to make another call or use the image data directly
+                this.loadDataverseImage(record.crdfd_multiimagesid, imgElement);
+                
+                // Add click handler to open full size image (always allow viewing)
+                imgElement.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.openImagePreview(record.crdfd_multiimagesid);
+                });
+                imgElement.style.cursor = 'pointer';
+                
+                // Set appropriate title based on environment
+                if (this.isMobileEnvironment()) {
+                    imgElement.title = 'Chạm để xem ảnh full size';
+                } else {
+                    imgElement.title = 'Click để xem ảnh full size';
+                }
+            }
+
+            // Only add interactive functionality if not readonly
+            if (!this._isReadOnly) {
+                // Add remove button event listener for existing image
+                const removeBtn = imageItem.querySelector('.remove-image') as HTMLButtonElement;
+                if (removeBtn) {
+                    removeBtn.addEventListener('click', () => {
+                        this.removeExistingImage(record.crdfd_multiimagesid, index);
+                    });
+                }
+
+                // Add note textarea event listener for existing image
+                const noteTextarea = imageItem.querySelector('.image-note') as HTMLTextAreaElement;
+                if (noteTextarea) {
+                    noteTextarea.addEventListener('input', (e) => {
+                        const target = e.target as HTMLTextAreaElement;
+                        this.debouncedUpdateExistingImageNote(record.crdfd_multiimagesid, target.value);
+                    });
+
+                    // Prevent event bubbling
+                    noteTextarea.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                    });
+                }
+            }
+
+            imageGrid.appendChild(imageItem);
+        });
+
+        // Display new selected images only if not readonly
+        if (!this._isReadOnly) {
+            this.displayNewImages();
+        }
+    }
+
+    /**
+     * Display newly selected images (not yet saved)
+     */
+    private displayNewImages(): void {
+        const imageGrid = this._container.querySelector('#imageGrid') as HTMLDivElement;
+        
+        // Add new images to grid (count already updated in displayExistingImages)
+        this._selectedImages.forEach((file, index) => {
+            const imageItem = document.createElement('div');
+            imageItem.className = 'image-item new-image';
+            imageItem.innerHTML = `
+                <img src="" alt="Preview" class="image-preview">
+                <div class="image-info">
+                    <div class="image-name">${file.name || `Pasted_Image_${index + 1}.${this.getImageExtension(file.type)}`}</div>
+                    <div class="image-size">${this.formatFileSize(file.size)} - Chưa lưu</div>
+                    <textarea class="image-note" placeholder="Nhập ghi chú..." data-index="${index}"></textarea>
+                </div>
+                <button class="remove-image new" data-index="${index}">×</button>
+                <button class="save-image" data-index="${index}">💾 Lưu</button>
+            `;
+
+            // Create preview image
+            const reader = new FileReader();
+            const imgElement = imageItem.querySelector('.image-preview') as HTMLImageElement;
+            reader.onload = (e) => {
+                if (e.target && e.target.result) {
+                    imgElement.src = e.target.result as string;
+                }
+            };
+            reader.readAsDataURL(file);
+
+            // Add remove button event listener
+            const removeBtn = imageItem.querySelector('.remove-image') as HTMLButtonElement;
+            removeBtn.addEventListener('click', () => {
+                this.removeNewImage(index);
+            });
+
+            // Add save button event listener  
+            const saveBtn = imageItem.querySelector('.save-image') as HTMLButtonElement;
+            saveBtn.addEventListener('click', () => {
+                this.saveImageToDataverse(index);
+            });
+
+            // Add note textarea event listener
+            const noteTextarea = imageItem.querySelector('.image-note') as HTMLTextAreaElement;
+            noteTextarea.addEventListener('input', (e) => {
+                const target = e.target as HTMLTextAreaElement;
+                this.debouncedUpdateImageNote(index, target.value);
+            });
+
+            // Prevent event bubbling
+            noteTextarea.addEventListener('click', (e) => {
+                e.stopPropagation();
+            });
+
+            // Load existing note if any
+            const existingNote = this.getImageNote(index);
+            if (existingNote) {
+                noteTextarea.value = existingNote;
+            }
+
+            imageGrid.appendChild(imageItem);
+        });
+    }
+
+    /**
+     * Load image from Dataverse
+     */
+    private async loadDataverseImage(imageId: string, imgElement: HTMLImageElement): Promise<void> {
+        try {
+            // For Dataverse images, we might need to use the File API or make a specific call
+            // This is a placeholder - actual implementation depends on how images are stored
+            const response = await this._context.webAPI.retrieveRecord("crdfd_multiimages", imageId, "?$select=crdfd_image");
+            if (response.crdfd_image) {
+                imgElement.src = `data:image/png;base64,${response.crdfd_image}`;
+            }
+        } catch (error) {
+            console.error("Error loading Dataverse image:", error);
+            // Set a placeholder or default image
+            imgElement.src = "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2VlZSIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjOTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+SW1hZ2U8L3RleHQ+PC9zdmc+";
+        }
+    }
+
+    /**
+     * Save a new image to Dataverse
+     */
+    private async saveImageToDataverse(index: number): Promise<void> {
+        if (!this._keyDataValue || !this._context.webAPI) {
+            this.updateStatus('Không có key data để lưu', 'error');
+            return;
+        }
+
+        const file = this._selectedImages[index];
+        if (!file) {
+            return;
+        }
+
+        try {
+            this.updateStatus('Đang lưu hình ảnh...', 'info');
+
+            // Convert image to base64
+            const base64String = await this.fileToBase64(file);
+            const note = this.getImageNote(index);
+            const fileName = file.name || `Image_${Date.now()}.${this.getImageExtension(file.type)}`;
+
+            // Create record in crdfd_multiimages
+            const record = {
+                crdfd_image_name: fileName,
+                crdfd_notes: note,
+                crdfd_key_data: this._keyDataValue,
+                crdfd_table: this._tableName,
+                crdfd_image: base64String.split(',')[1] // Remove data:image prefix
+            };
+
+            const result = await this._context.webAPI.createRecord("crdfd_multiimages", record);
+
+            // Remove from selected images and add to existing
+            this._selectedImages.splice(index, 1);
+            this._imageNotes.splice(index, 1);
+
+            // Reload existing images
+            await this.loadExistingImages();
+
+            this.updateStatus('Đã lưu hình ảnh thành công', 'success');
+
+        } catch (error) {
+            console.error("Error saving image to Dataverse:", error);
+            this.updateStatus('Lỗi khi lưu hình ảnh', 'error');
+        }
+    }
+
+    /**
+     * Remove existing image from Dataverse
+     */
+    private async removeExistingImage(imageId: string, index: number): Promise<void> {
+        if (!confirm('Bạn có chắc muốn xóa hình ảnh này khỏi Dataverse?')) {
+            return;
+        }
+
+        try {
+            this.updateStatus('Đang xóa hình ảnh...', 'info');
+
+            await this._context.webAPI.deleteRecord("crdfd_multiimages", imageId);
+
+            // Remove from existing images array
+            this._existingImages.splice(index, 1);
+            this._imagesCount = this._existingImages.length + this._selectedImages.length;
+
+            // Update display
+            this.displayExistingImages();
+
+            this.updateStatus('Đã xóa hình ảnh', 'success');
+
+        } catch (error) {
+            console.error("Error removing existing image:", error);
+            this.updateStatus('Lỗi khi xóa hình ảnh', 'error');
+        }
+    }
+
+    /**
+     * Update note for existing image in Dataverse with debouncing
+     */
+    private debouncedUpdateExistingImageNote(imageId: string, note: string): void {
+        // Clear existing timer for this image
+        const existingTimer = this._debounceTimers.get(imageId);
+        if (existingTimer) {
+            clearTimeout(existingTimer);
+        }
+
+        // Set new timer
+        const timer = setTimeout(() => {
+            this.updateExistingImageNote(imageId, note);
+            this._debounceTimers.delete(imageId);
+        }, 800); // Wait 800ms after user stops typing
+
+        this._debounceTimers.set(imageId, timer);
+
+        // Update local data immediately for responsive UI
+        const existingImage = this._existingImages.find(img => img.crdfd_multiimagesid === imageId);
+        if (existingImage) {
+            existingImage.crdfd_notes = note;
+        }
+    }
+
+    /**
+     * Update note for existing image in Dataverse
+     */
+    private async updateExistingImageNote(imageId: string, note: string): Promise<void> {
+        try {
+            const record = {
+                crdfd_notes: note
+            };
+
+            await this._context.webAPI.updateRecord("crdfd_multiimages", imageId, record);
+
+            // Update local data
+            const existingImage = this._existingImages.find(img => img.crdfd_multiimagesid === imageId);
+            if (existingImage) {
+                existingImage.crdfd_notes = note;
+            }
+
+        } catch (error) {
+            console.error("Error updating note:", error);
+            this.updateStatus('Lỗi khi cập nhật ghi chú', 'error');
+        }
+    }
+
+    /**
+     * Remove new image (not yet saved)
+     */
+    private removeNewImage(index: number): void {
+        this._selectedImages.splice(index, 1);
+        this._imageNotes.splice(index, 1);
+        
+        // Refresh display
+        if (this._existingImages.length > 0 || this._keyDataValue) {
+            this.displayExistingImages();
+        } else {
+            this.updateImageDisplay();
+        }
+        
+        this.updateStatus('Đã xóa hình ảnh chưa lưu', 'info');
+    }
+
+    /**
+     * Opens image preview in new window
+     */
+    private openImagePreview(imageId: string): void {
+        // Check if running in mobile environment
+        if (this.isMobileEnvironment()) {
+            // For mobile, create an overlay modal to display the image
+            this.showImageModal(imageId);
+        } else {
+            // For web, use the original method
+            const baseUrl = this.getEnvironmentBaseUrl();
+            const timestamp = Date.now();
+            
+            // Construct the image download URL
+            const imageUrl = `${baseUrl}/Image/download.aspx?Entity=crdfd_multiimages&Attribute=crdfd_image&Id=${imageId}&Timestamp=${timestamp}&Full=true`;
+            
+            // Open in new window/tab
+            window.open(imageUrl, '_blank', 'noopener,noreferrer');
+        }
+    }
+
+    /**
+     * Check if running in mobile environment
+     */
+    private isMobileEnvironment(): boolean {
+        try {
+            // Check if it's Power Apps mobile
+            if (typeof window !== 'undefined') {
+                const userAgent = window.navigator.userAgent.toLowerCase();
+                
+                // Check for Power Apps mobile indicators
+                if (userAgent.includes('powerapps') || 
+                    userAgent.includes('mobile') ||
+                    /android|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent)) {
+                    return true;
+                }
+                
+                // Check for small screen size (mobile indicator)
+                if (window.innerWidth <= 768) {
+                    return true;
+                }
+                
+                // Check for touch device
+                if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
+                    return true;
+                }
+                
+                // Check for Power Apps specific context
+                if (window.location && window.location.href.includes('apps.powerapps.com')) {
+                    return true;
+                }
+            }
+            
+            return false;
+        } catch (error) {
+            console.warn('Could not determine mobile environment:', error);
+            // Default to mobile-friendly approach if cannot determine
+            return true;
+        }
+    }
+
+    /**
+     * Show image in modal overlay for mobile
+     */
+    private async showImageModal(imageId: string): Promise<void> {
+        try {
+            // Remove any existing modal
+            this.removeImageModal();
+            
+            this.updateStatus('Đang chuẩn bị hiển thị ảnh...', 'info');
+            
+            // Get only the image name for the modal title
+            const response = await this._context.webAPI.retrieveRecord("crdfd_multiimages", imageId, "?$select=crdfd_image_name,crdfd_image");
+            
+            // Construct the full size image URL for display and download
+            const baseUrl = this.getEnvironmentBaseUrl();
+            const timestamp = Date.now();
+            const fullImageUrl = `${baseUrl}/Image/download.aspx?Entity=crdfd_multiimages&Attribute=crdfd_image&Id=${imageId}&Timestamp=${timestamp}&Full=true`;
+
+            // Create modal overlay
+            const modalOverlay = document.createElement('div');
+            modalOverlay.id = 'imageModal';
+            modalOverlay.className = 'image-modal-overlay';
+
+            modalOverlay.innerHTML = `
+                <div class="image-modal-content">
+                    <div class="image-modal-header">
+                        <span class="image-modal-title">${response.crdfd_image_name || 'Hình ảnh'}</span>
+                        <button class="image-modal-close">×</button>
+                    </div>
+                    <div class="image-modal-body">
+                        <img src="${fullImageUrl}" alt="Full size image" class="image-modal-img" crossorigin="anonymous">
+                        <div class="image-loading">Đang tải ảnh full size...</div>
+                        <div class="zoom-instructions">
+                            ${this.isMobileEnvironment() ? 
+                                'Pinch để zoom • Kéo để xem các góc • Double-tap để reset' : 
+                                'Scroll để zoom • Kéo để xem các góc • Double-click để reset'
+                            }
+                        </div>
+                    </div>
+                    <div class="image-modal-footer">
+                        <button class="image-modal-download">📥 Tải về</button>
+                        <button class="image-modal-close-btn">Đóng</button>
+                    </div>
+                </div>
+            `;
+            
+            // Add to document
+            document.body.appendChild(modalOverlay);
+            
+            // Add event listeners
+            const closeBtn = modalOverlay.querySelector('.image-modal-close') as HTMLButtonElement;
+            const closeBtnFooter = modalOverlay.querySelector('.image-modal-close-btn') as HTMLButtonElement;
+            const downloadBtn = modalOverlay.querySelector('.image-modal-download') as HTMLButtonElement;
+            const img = modalOverlay.querySelector('.image-modal-img') as HTMLImageElement;
+            const loadingDiv = modalOverlay.querySelector('.image-loading') as HTMLDivElement;
+            
+            // Close modal handlers
+            const closeModal = () => {
+                this.removeImageModal();
+            };
+            
+            closeBtn.addEventListener('click', closeModal);
+            closeBtnFooter.addEventListener('click', closeModal);
+            
+            // Close when clicking outside
+            modalOverlay.addEventListener('click', (e) => {
+                if (e.target === modalOverlay) {
+                    closeModal();
+                }
+            });
+            
+            // Image load handlers
+            img.addEventListener('load', () => {
+                loadingDiv.style.display = 'none';
+                img.style.display = 'block';
+                
+                // Show zoom instructions after image loads
+                const instructions = modalOverlay.querySelector('.zoom-instructions') as HTMLDivElement;
+                if (instructions) {
+                    setTimeout(() => {
+                        instructions.style.opacity = '1';
+                        setTimeout(() => {
+                            instructions.style.opacity = '0';
+                        }, 3000); // Hide after 3 seconds
+                    }, 500);
+                }
+                
+                // Auto-fit image to modal size on load
+                this.autoFitImage(img);
+                
+                if (this.isMobileEnvironment()) {
+                    this.updateStatus('Ảnh full size đã tải. Pinch để zoom, kéo để xem các góc', 'success');
+                } else {
+                    this.updateStatus('Ảnh full size đã được tải. Scroll để zoom, kéo để xem các góc', 'success');
+                }
+            });
+            
+            img.addEventListener('error', () => {
+                loadingDiv.textContent = 'Không thể tải ảnh full size. Đang hiển thị ảnh preview...';
+                // Fallback to base64 if web link fails and we have it
+                if (response.crdfd_image) {
+                    img.src = `data:image/png;base64,${response.crdfd_image}`;
+                    img.style.display = 'block';
+                    loadingDiv.style.display = 'none';
+                    this.updateStatus('Hiển thị ảnh preview', 'info');
+                } else {
+                    this.updateStatus('Không thể tải ảnh', 'error');
+                }
+            });
+            
+            // Download handler - use the full size web URL
+            downloadBtn.addEventListener('click', () => {
+                this.downloadImageFromUrl(fullImageUrl, response.crdfd_image_name || 'image.png');
+            });
+            
+            // Pinch to zoom support for mobile
+            this.addPinchToZoom(img);
+            
+            this.updateStatus('Ảnh đã được hiển thị', 'success');
+            
+        } catch (error) {
+            console.error('Error showing image modal:', error);
+            this.updateStatus('Lỗi khi hiển thị ảnh', 'error');
+        }
+    }
+
+    /**
+     * Remove image modal
+     */
+    private removeImageModal(): void {
+        const existingModal = document.getElementById('imageModal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+    }
+
+    /**
+     * Download image from URL (for full size images)
+     */
+    private downloadImageFromUrl(imageUrl: string, fileName: string): void {
+        try {
+            if (this.isMobileEnvironment()) {
+                // For mobile, open in new tab/window - the browser will handle download
+                window.open(imageUrl, '_blank', 'noopener,noreferrer');
+                this.updateStatus('Đã mở ảnh full size trong tab mới', 'success');
+            } else {
+                // For desktop, create download link
+                const link = document.createElement('a');
+                link.href = imageUrl;
+                link.download = fileName;
+                link.target = '_blank';
+                
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                this.updateStatus('Đang tải ảnh full size...', 'success');
+            }
+        } catch (error) {
+            console.error('Error downloading image:', error);
+            this.updateStatus('Lỗi khi tải ảnh', 'error');
+        }
+    }
+
+    /**
+     * Add pinch to zoom functionality for mobile with smooth zoom levels
+     */
+    private addPinchToZoom(imgElement: HTMLImageElement): void {
+        let scale = 1;
+        let startDistance = 0;
+        let initialScale = 1;
+        let translateX = 0;
+        let translateY = 0;
+        let lastTouchX = 0;
+        let lastTouchY = 0;
+        let isPanning = false;
+        let isZooming = false;
+        
+        // Get initial scale from the element (from autoFit)
+        const computedStyle = window.getComputedStyle(imgElement);
+        const matrix = computedStyle.transform;
+        if (matrix && matrix !== 'none') {
+            const matrixMatch = matrix.match(/matrix\(([^)]+)\)/);
+            if (matrixMatch) {
+                const values = matrixMatch[1].split(',').map(parseFloat);
+                scale = values[0]; // First value is scaleX
+            }
+        }
+        
+        // Set initial styles for better transform handling
+        imgElement.style.transformOrigin = 'center center';
+        imgElement.style.transition = 'transform 0.3s ease-out';
+        
+        imgElement.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            
+            if (e.touches.length === 2) {
+                // Two finger pinch to zoom
+                startDistance = this.getDistance(e.touches[0], e.touches[1]);
+                initialScale = scale;
+                isZooming = true;
+                imgElement.style.transition = 'none'; // Disable transition during pinch
+            } else if (e.touches.length === 1) {
+                // Single finger - allow panning at any scale
+                isPanning = true;
+                lastTouchX = e.touches[0].clientX;
+                lastTouchY = e.touches[0].clientY;
+                imgElement.style.transition = 'none'; // Disable transition during pan
+            }
+        });
+        
+        imgElement.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            
+            if (e.touches.length === 2 && isZooming) {
+                // Pinch zoom with smooth scaling and zoom-to-center-of-fingers
+                const currentDistance = this.getDistance(e.touches[0], e.touches[1]);
+                const scaleChange = currentDistance / startDistance;
+                const newScale = initialScale * scaleChange;
+                
+                // Calculate center point between fingers
+                const touch1 = e.touches[0];
+                const touch2 = e.touches[1];
+                const centerX = (touch1.clientX + touch2.clientX) / 2;
+                const centerY = (touch1.clientY + touch2.clientY) / 2;
+                
+                // Get center relative to image
+                const rect = imgElement.getBoundingClientRect();
+                const imageCenterX = rect.left + rect.width / 2;
+                const imageCenterY = rect.top + rect.height / 2;
+                const offsetX = centerX - imageCenterX;
+                const offsetY = centerY - imageCenterY;
+                
+                // Apply zoom bounds
+                const oldScale = scale;
+                scale = Math.min(Math.max(1.0, newScale), 4.0); // Giới hạn từ 100% đến 400%
+                const actualScaleChange = scale / oldScale;
+                
+                // Adjust translation to zoom towards finger center
+                if (actualScaleChange !== 1) {
+                    const zoomOffsetX = offsetX * (actualScaleChange - 1) * 0.5; // Reduce intensity for touch
+                    const zoomOffsetY = offsetY * (actualScaleChange - 1) * 0.5;
+                    
+                    translateX = (translateX - zoomOffsetX) * actualScaleChange;
+                    translateY = (translateY - zoomOffsetY) * actualScaleChange;
+                    
+                    // Apply bounds
+                    const maxTranslateX = Math.max(0, (scale - 0.2) * imgElement.clientWidth / 2);
+                    const maxTranslateY = Math.max(0, (scale - 0.2) * imgElement.clientHeight / 2);
+                    
+                    translateX = Math.min(Math.max(translateX, -maxTranslateX), maxTranslateX);
+                    translateY = Math.min(Math.max(translateY, -maxTranslateY), maxTranslateY);
+                }
+                
+                this.updateImageTransform(imgElement, scale, translateX, translateY);
+            } else if (e.touches.length === 1 && isPanning && !isZooming) {
+                // Pan image - allow at any zoom level with improved sensitivity and edge resistance
+                const deltaX = e.touches[0].clientX - lastTouchX;
+                const deltaY = e.touches[0].clientY - lastTouchY;
+                
+                // More generous and responsive pan bounds with edge resistance
+                const maxTranslateX = Math.max(0, (scale - 0.8) * imgElement.clientWidth / 2);
+                const maxTranslateY = Math.max(0, (scale - 0.8) * imgElement.clientHeight / 2);
+                
+                let newTranslateX = translateX + deltaX;
+                let newTranslateY = translateY + deltaY;
+                
+                // Add edge resistance when near boundaries
+                if (newTranslateX > maxTranslateX) {
+                    const overshoot = newTranslateX - maxTranslateX;
+                    newTranslateX = maxTranslateX + overshoot * 0.3; // Resistance factor
+                } else if (newTranslateX < -maxTranslateX) {
+                    const overshoot = -maxTranslateX - newTranslateX;
+                    newTranslateX = -maxTranslateX - overshoot * 0.3;
+                }
+                
+                if (newTranslateY > maxTranslateY) {
+                    const overshoot = newTranslateY - maxTranslateY;
+                    newTranslateY = maxTranslateY + overshoot * 0.3;
+                } else if (newTranslateY < -maxTranslateY) {
+                    const overshoot = -maxTranslateY - newTranslateY;
+                    newTranslateY = -maxTranslateY - overshoot * 0.3;
+                }
+                
+                translateX = newTranslateX;
+                translateY = newTranslateY;
+                
+                this.updateImageTransform(imgElement, scale, translateX, translateY);
+                
+                lastTouchX = e.touches[0].clientX;
+                lastTouchY = e.touches[0].clientY;
+            }
+        });
+        
+        // Smooth double tap with continuous zoom
+        let lastTouchEnd = 0;
+        let tapTimeout: NodeJS.Timeout | null = null;
+        
+        imgElement.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            isPanning = false;
+            isZooming = false;
+            
+            const now = Date.now();
+            
+            if (tapTimeout) {
+                clearTimeout(tapTimeout);
+                tapTimeout = null;
+            }
+            
+            if (now - lastTouchEnd <= 300) {
+                // Smooth double tap - cycle through useful zoom levels
+                if (scale < 1.2) {
+                    // If at base zoom, go to 1.5x
+                    scale = 1.5;
+                } else if (scale < 2.0) {
+                    // If at 1.5x, go to 2x
+                    scale = 2.0;
+                } else if (scale < 3.0) {
+                    // If at 2x, go to 3x
+                    scale = 3.0;
+                } else {
+                    // If zoomed in, reset to base
+                    scale = 1.0;
+                }
+                
+                // Reset position for high zoom levels
+                if (scale >= 3.0) {
+                    translateX = 0;
+                    translateY = 0;
+                }
+                
+                imgElement.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+                this.updateImageTransform(imgElement, scale, translateX, translateY);
+            } else {
+                // Single tap or end of gesture - snap back to bounds if needed
+                this.snapToBounds(imgElement, scale);
+                
+                // Single tap - set timeout to handle it if no second tap comes
+                tapTimeout = setTimeout(() => {
+                    tapTimeout = null;
+                }, 300);
+            }
+            
+            lastTouchEnd = now;
+        });
+        
+        // Handle gestures ending with snap to bounds
+        imgElement.addEventListener('touchcancel', (e) => {
+            e.preventDefault();
+            isPanning = false;
+            isZooming = false;
+            this.snapToBounds(imgElement, scale);
+        });
+        
+        // Enhanced wheel zoom for desktop - smooth zoom to cursor position
+        imgElement.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            
+            // Get cursor position relative to image
+            const rect = imgElement.getBoundingClientRect();
+            const cursorX = e.clientX - rect.left - rect.width / 2;
+            const cursorY = e.clientY - rect.top - rect.height / 2;
+            
+            // Calculate zoom
+            const zoomSensitivity = 0.1;
+            const delta = e.deltaY > 0 ? -zoomSensitivity : zoomSensitivity;
+            const oldScale = scale;
+            const newScale = scale + delta;
+            
+            // Apply zoom bounds
+            scale = Math.min(Math.max(1.0, newScale), 4.0); // Giới hạn từ 100% đến 400%
+            const scaleChange = scale / oldScale;
+            
+            // Adjust translation to zoom towards cursor position
+            const zoomOffsetX = cursorX * (scaleChange - 1);
+            const zoomOffsetY = cursorY * (scaleChange - 1);
+            
+            translateX = (translateX - zoomOffsetX) * scaleChange;
+            translateY = (translateY - zoomOffsetY) * scaleChange;
+            
+            // Apply bounds to prevent panning too far
+            const maxTranslateX = Math.max(0, (scale - 0.8) * imgElement.clientWidth / 2);
+            const maxTranslateY = Math.max(0, (scale - 0.8) * imgElement.clientHeight / 2);
+            
+            translateX = Math.min(Math.max(translateX, -maxTranslateX), maxTranslateX);
+            translateY = Math.min(Math.max(translateY, -maxTranslateY), maxTranslateY);
+            
+            // Only reset position for very high zoom
+            if (scale >= 3.5) {
+                translateX = 0;
+                translateY = 0;
+            }
+            
+            this.updateImageTransform(imgElement, scale, translateX, translateY);
+        });
+        
+        // Enhanced mouse drag support with momentum and corner detection
+        let isMouseDragging = false;
+        let lastMouseX = 0;
+        let lastMouseY = 0;
+        let dragStartTime = 0;
+        let dragVelocityX = 0;
+        let dragVelocityY = 0;
+        let lastDragTime = 0;
+        
+        imgElement.addEventListener('mousedown', (e) => {
+            // Allow panning at any scale level
+            e.preventDefault();
+            isMouseDragging = true;
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+            dragStartTime = Date.now();
+            lastDragTime = dragStartTime;
+            dragVelocityX = 0;
+            dragVelocityY = 0;
+            imgElement.style.cursor = 'grabbing';
+            imgElement.style.transition = 'none';
+        });
+        
+        imgElement.addEventListener('mousemove', (e) => {
+            if (isMouseDragging) {
+                e.preventDefault();
+                
+                const currentTime = Date.now();
+                const deltaX = e.clientX - lastMouseX;
+                const deltaY = e.clientY - lastMouseY;
+                const deltaTime = currentTime - lastDragTime;
+                
+                // Calculate velocity for momentum
+                if (deltaTime > 0) {
+                    dragVelocityX = deltaX / deltaTime * 16; // 60fps normalization
+                    dragVelocityY = deltaY / deltaTime * 16;
+                }
+                
+                // Generous and responsive pan bounds with edge resistance
+                const maxTranslateX = Math.max(0, (scale - 0.8) * imgElement.clientWidth / 2);
+                const maxTranslateY = Math.max(0, (scale - 0.8) * imgElement.clientHeight / 2);
+                
+                let newTranslateX = translateX + deltaX;
+                let newTranslateY = translateY + deltaY;
+                
+                // Add edge resistance when near boundaries
+                if (newTranslateX > maxTranslateX) {
+                    const overshoot = newTranslateX - maxTranslateX;
+                    newTranslateX = maxTranslateX + overshoot * 0.3; // Resistance factor
+                } else if (newTranslateX < -maxTranslateX) {
+                    const overshoot = -maxTranslateX - newTranslateX;
+                    newTranslateX = -maxTranslateX - overshoot * 0.3;
+                }
+                
+                if (newTranslateY > maxTranslateY) {
+                    const overshoot = newTranslateY - maxTranslateY;
+                    newTranslateY = maxTranslateY + overshoot * 0.3;
+                } else if (newTranslateY < -maxTranslateY) {
+                    const overshoot = -maxTranslateY - newTranslateY;
+                    newTranslateY = -maxTranslateY - overshoot * 0.3;
+                }
+                
+                translateX = newTranslateX;
+                translateY = newTranslateY;
+                
+                this.updateImageTransform(imgElement, scale, translateX, translateY);
+                
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+                lastDragTime = currentTime;
+            }
+        });
+        
+        imgElement.addEventListener('mouseup', (e) => {
+            if (isMouseDragging) {
+                e.preventDefault();
+                isMouseDragging = false;
+                imgElement.style.cursor = 'grab';
+                
+                // Apply momentum scrolling if drag was fast enough
+                const dragDuration = Date.now() - dragStartTime;
+                const totalVelocity = Math.sqrt(dragVelocityX * dragVelocityX + dragVelocityY * dragVelocityY);
+                
+                if (dragDuration < 300 && totalVelocity > 2) {
+                    this.applyMomentumScrolling(imgElement, dragVelocityX, dragVelocityY, scale);
+                } else {
+                    // Snap back to bounds if overshot
+                    this.snapToBounds(imgElement, scale);
+                }
+            }
+        });
+        
+        imgElement.addEventListener('mouseleave', (e) => {
+            if (isMouseDragging) {
+                isMouseDragging = false;
+                imgElement.style.cursor = 'grab';
+                // Snap back to bounds when mouse leaves
+                this.snapToBounds(imgElement, scale);
+            }
+        });
+        
+        // Right-click context menu for additional controls
+        imgElement.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            
+            // Simple context menu with reset options
+            const contextMenu = document.createElement('div');
+            contextMenu.className = 'image-context-menu';
+            contextMenu.style.cssText = `
+                position: fixed;
+                left: ${e.clientX}px;
+                top: ${e.clientY}px;
+                background: white;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+                z-index: 10000;
+                padding: 4px 0;
+                font-size: 14px;
+                min-width: 120px;
+            `;
+            
+            // Reset zoom option
+            const resetOption = document.createElement('div');
+            resetOption.textContent = '🔍 Reset Zoom (100%)';
+            resetOption.style.cssText = `
+                padding: 8px 12px;
+                cursor: pointer;
+                transition: background-color 0.2s;
+            `;
+            resetOption.addEventListener('mouseenter', () => resetOption.style.backgroundColor = '#f0f0f0');
+            resetOption.addEventListener('mouseleave', () => resetOption.style.backgroundColor = '');
+            resetOption.addEventListener('click', () => {
+                scale = 1.0;
+                translateX = 0;
+                translateY = 0;
+                imgElement.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+                this.updateImageTransform(imgElement, scale, translateX, translateY);
+                document.body.removeChild(contextMenu);
+            });
+            
+            // Fit to screen option
+            const fitOption = document.createElement('div');
+            fitOption.textContent = '📐 Fit to Screen';
+            fitOption.style.cssText = `
+                padding: 8px 12px;
+                cursor: pointer;
+                transition: background-color 0.2s;
+            `;
+            fitOption.addEventListener('mouseenter', () => fitOption.style.backgroundColor = '#f0f0f0');
+            fitOption.addEventListener('mouseleave', () => fitOption.style.backgroundColor = '');
+            fitOption.addEventListener('click', () => {
+                this.autoFitImage(imgElement);
+                document.body.removeChild(contextMenu);
+            });
+            
+            contextMenu.appendChild(resetOption);
+            contextMenu.appendChild(fitOption);
+            document.body.appendChild(contextMenu);
+            
+            // Remove context menu when clicking elsewhere
+            const removeMenu = (event: MouseEvent) => {
+                if (!contextMenu.contains(event.target as Node)) {
+                    document.body.removeChild(contextMenu);
+                    document.removeEventListener('click', removeMenu);
+                }
+            };
+            setTimeout(() => document.addEventListener('click', removeMenu), 0);
+        });
+        
+        // Smooth double click for desktop
+        imgElement.addEventListener('dblclick', (e) => {
+            e.preventDefault();
+            
+            // Cycle through useful zoom levels smoothly
+            if (scale < 1.2) {
+                // If at base zoom, go to 1.5x
+                scale = 1.5;
+            } else if (scale < 2.0) {
+                // If at 1.5x, go to 2x
+                scale = 2.0;
+            } else if (scale < 3.0) {
+                // If at 2x, go to 3x
+                scale = 3.0;
+            } else {
+                // If zoomed in, reset to base
+                scale = 1.0;
+            }
+            
+            // Reset position for high zoom
+            if (scale >= 3.0) {
+                translateX = 0;
+                translateY = 0;
+            }
+            
+            imgElement.style.cursor = 'grab';
+            imgElement.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+            this.updateImageTransform(imgElement, scale, translateX, translateY);
+        });
+    }
+    
+    /**
+     * Auto-fit image to modal size on load with smart sizing
+     */
+    private autoFitImage(imgElement: HTMLImageElement): void {
+        const modalBody = imgElement.closest('.image-modal-body') as HTMLElement;
+        if (!modalBody) return;
+        
+        const bodyWidth = modalBody.clientWidth;
+        const bodyHeight = modalBody.clientHeight;
+        
+        // Get natural image dimensions
+        const imgWidth = imgElement.naturalWidth;
+        const imgHeight = imgElement.naturalHeight;
+        
+        if (imgWidth && imgHeight) {
+            // Calculate scale to fit image optimally in the modal
+            const scaleX = bodyWidth / imgWidth;
+            const scaleY = bodyHeight / imgHeight;
+            const fitScale = Math.min(scaleX, scaleY);
+            
+            // Ensure minimum 100% zoom (1.0) and maximum 400% (4.0)
+            // If image is smaller than modal, keep at 100%
+            // If image is larger than modal, scale down but not below 100%
+            const optimalScale = Math.min(Math.max(fitScale, 1.0), 4.0);
+            
+            // Set initial transform with constrained fit
+            imgElement.style.transform = `scale(${optimalScale})`;
+            imgElement.style.transformOrigin = 'center center';
+            
+            // Always show cursor as grab since user can zoom
+            imgElement.style.cursor = 'grab';
+        }
+    }
+
+    /**
+     * Update image transform with scale and translation - enhanced with better feedback
+     */
+    private updateImageTransform(imgElement: HTMLImageElement, scale: number, translateX: number, translateY: number): void {
+        imgElement.style.transform = `scale(${scale}) translate(${translateX / scale}px, ${translateY / scale}px)`;
+        
+        // Show zoom level indicator with better styling
+        this.showZoomIndicator(imgElement, scale);
+        
+        // Update cursor based on zoom level
+        if (scale <= 1.2) {
+            imgElement.style.cursor = 'zoom-in';
+        } else if (scale >= 3.5) {
+            imgElement.style.cursor = 'zoom-out';
+        } else {
+            imgElement.style.cursor = 'grab';
+        }
+    }
+    
+    /**
+     * Show zoom level indicator temporarily with enhanced styling
+     */
+    private showZoomIndicator(imgElement: HTMLImageElement, scale: number): void {
+        // Remove existing indicator
+        const existingIndicator = document.querySelector('.zoom-indicator');
+        if (existingIndicator) {
+            existingIndicator.remove();
+        }
+        
+        // Create enhanced zoom indicator
+        const indicator = document.createElement('div');
+        indicator.className = 'zoom-indicator';
+        
+        // Add scale percentage with smooth display
+        const percentage = Math.round(scale * 100);
+        let scaleText = `${percentage}%`;
+        let scaleClass = '';
+        
+        // Add contextual labels based on zoom level
+        if (scale <= 1.2) {
+            scaleClass = 'zoom-small';
+            scaleText += ' 🔍-';
+        } else if (scale >= 3.5) {
+            scaleClass = 'zoom-large';
+            scaleText += ' 🔍+';
+        } else if (Math.abs(scale - 1) < 0.05) {
+            scaleClass = 'zoom-normal';
+            scaleText = '100% ✓';
+        }
+        
+        indicator.textContent = scaleText;
+        indicator.classList.add(scaleClass);
+        
+        // Add to modal body with better positioning
+        const modalBody = imgElement.closest('.image-modal-body');
+        if (modalBody) {
+            modalBody.appendChild(indicator);
+            
+            // Animate in
+            indicator.style.opacity = '1';
+            indicator.style.transform = 'scale(1)';
+            
+            // Auto hide with smooth fade
+            setTimeout(() => {
+                if (indicator.parentNode) {
+                    indicator.style.opacity = '0';
+                    indicator.style.transform = 'scale(0.8)';
+                    setTimeout(() => {
+                        if (indicator.parentNode) {
+                            indicator.remove();
+                        }
+                    }, 300);
+                }
+            }, 1200); // Giảm thời gian hiển thị từ 1800ms xuống 1200ms để smoother
+        }
+    }
+
+    /**
+     * Get distance between two touch points
+     */
+    private getDistance(touch1: Touch, touch2: Touch): number {
+        const dx = touch1.clientX - touch2.clientX;
+        const dy = touch1.clientY - touch2.clientY;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    /**
+     * Apply momentum scrolling after mouse drag
+     */
+    private applyMomentumScrolling(imgElement: HTMLImageElement, velocityX: number, velocityY: number, currentScale: number): void {
+        const friction = 0.95; // Friction factor
+        const minVelocity = 0.1; // Minimum velocity to continue animation
+        
+        let currentVelocityX = velocityX;
+        let currentVelocityY = velocityY;
+        
+        const animate = () => {
+            // Apply friction
+            currentVelocityX *= friction;
+            currentVelocityY *= friction;
+            
+            // Get current transform values
+            const computedStyle = window.getComputedStyle(imgElement);
+            const matrix = computedStyle.transform;
+            let currentTranslateX = 0;
+            let currentTranslateY = 0;
+            
+            if (matrix && matrix !== 'none') {
+                const matrixMatch = matrix.match(/matrix\(([^)]+)\)/);
+                if (matrixMatch) {
+                    const values = matrixMatch[1].split(',').map(parseFloat);
+                    currentTranslateX = values[4] * currentScale; // Extract translateX and scale back
+                    currentTranslateY = values[5] * currentScale; // Extract translateY and scale back
+                }
+            }
+            
+            // Calculate new position
+            const newTranslateX = currentTranslateX + currentVelocityX;
+            const newTranslateY = currentTranslateY + currentVelocityY;
+            
+            // Apply bounds
+            const maxTranslateX = Math.max(0, (currentScale - 0.8) * imgElement.clientWidth / 2);
+            const maxTranslateY = Math.max(0, (currentScale - 0.8) * imgElement.clientHeight / 2);
+            
+            const boundedTranslateX = Math.min(Math.max(newTranslateX, -maxTranslateX), maxTranslateX);
+            const boundedTranslateY = Math.min(Math.max(newTranslateY, -maxTranslateY), maxTranslateY);
+            
+            // Apply transform
+            imgElement.style.transform = `scale(${currentScale}) translate(${boundedTranslateX / currentScale}px, ${boundedTranslateY / currentScale}px)`;
+            
+            // Continue animation if velocity is significant
+            const totalVelocity = Math.sqrt(currentVelocityX * currentVelocityX + currentVelocityY * currentVelocityY);
+            if (totalVelocity > minVelocity && 
+                (newTranslateX === boundedTranslateX && newTranslateY === boundedTranslateY)) {
+                requestAnimationFrame(animate);
+            } else {
+                // Final snap to bounds
+                imgElement.style.transition = 'transform 0.3s ease-out';
+                imgElement.style.transform = `scale(${currentScale}) translate(${boundedTranslateX / currentScale}px, ${boundedTranslateY / currentScale}px)`;
+            }
+        };
+        
+        // Start momentum animation
+        imgElement.style.transition = 'none';
+        requestAnimationFrame(animate);
+    }
+
+    /**
+     * Snap image back to bounds with smooth animation
+     */
+    private snapToBounds(imgElement: HTMLImageElement, currentScale: number): void {
+        // Get current transform values
+        const computedStyle = window.getComputedStyle(imgElement);
+        const matrix = computedStyle.transform;
+        let currentTranslateX = 0;
+        let currentTranslateY = 0;
+        
+        if (matrix && matrix !== 'none') {
+            const matrixMatch = matrix.match(/matrix\(([^)]+)\)/);
+            if (matrixMatch) {
+                const values = matrixMatch[1].split(',').map(parseFloat);
+                currentTranslateX = values[4] * currentScale; // Extract translateX and scale back
+                currentTranslateY = values[5] * currentScale; // Extract translateY and scale back
+            }
+        }
+        
+        // Calculate bounds
+        const maxTranslateX = Math.max(0, (currentScale - 0.8) * imgElement.clientWidth / 2);
+        const maxTranslateY = Math.max(0, (currentScale - 0.8) * imgElement.clientHeight / 2);
+        
+        // Snap to bounds
+        const boundedTranslateX = Math.min(Math.max(currentTranslateX, -maxTranslateX), maxTranslateX);
+        const boundedTranslateY = Math.min(Math.max(currentTranslateY, -maxTranslateY), maxTranslateY);
+        
+        // Apply smooth transition back to bounds
+        imgElement.style.transition = 'transform 0.3s ease-out';
+        imgElement.style.transform = `scale(${currentScale}) translate(${boundedTranslateX / currentScale}px, ${boundedTranslateY / currentScale}px)`;
+    }
+
+    /**
+     * Gets table name from context
+     */
+    private getTableNameFromContext(context: ComponentFramework.Context<IInputs>): string {
+        try {
+            // Method 1: Try to get from context page input (works for both web and mobile)
+            const contextWithPage = context as ComponentFramework.Context<IInputs> & { page?: { entityTypeName?: string } };
+            if (contextWithPage && contextWithPage.page && contextWithPage.page.entityTypeName) {
+                const tableName = contextWithPage.page.entityTypeName;
+                console.log('Table name found via context.page:', tableName);
+                return tableName;
+            }
+            
+            // Method 2: Try to get from context mode (alternative approach)
+            const contextMode = context.mode as ComponentFramework.Mode & { contextInfo?: { entityName?: string } };
+            if (context && context.mode && contextMode.contextInfo && contextMode.contextInfo.entityName) {
+                const tableName = contextMode.contextInfo.entityName;
+                console.log('Table name found via context.mode.contextInfo:', tableName);
+                return tableName;
+            }
+            
+            // Method 3: Try to extract from URL (mainly for web desktop)
+            if (typeof window !== 'undefined' && window.location && window.location.href) {
+                const url = window.location.href;
+                
+                // Pattern to match entity name in Dynamics URL (desktop)
+                const match = url.match(/etn=([^&]+)/);
+                if (match && match[1]) {
+                    console.log('Table name found via URL etn parameter:', match[1]);
+                    return match[1];
+                }
+                
+                // Alternative pattern for different URL formats
+                const pathMatch = url.match(/\/main\.aspx.*[?&]etn=([^&]+)/);
+                if (pathMatch && pathMatch[1]) {
+                    console.log('Table name found via URL path match:', pathMatch[1]);
+                    return pathMatch[1];
+                }
+                
+                // Power Apps mobile URL pattern
+                const mobileMatch = url.match(/\/apps\/[^/]+\/[^/]+\/([^/]+)/);
+                if (mobileMatch && mobileMatch[1]) {
+                    console.log('Table name found via mobile URL pattern:', mobileMatch[1]);
+                    return mobileMatch[1];
+                }
+            }
+            
+            // Method 4: Try to get from context parameters or properties
+            try {
+                const contextWithParams = context as ComponentFramework.Context<IInputs> & { 
+                    parameters?: Record<string, { attributes?: { LogicalName?: string } }> 
+                };
+                if (contextWithParams && contextWithParams.parameters) {
+                    const params = contextWithParams.parameters;
+                    // Check if there's an entity reference parameter
+                    for (const key in params) {
+                        if (params[key] && params[key].attributes && params[key].attributes.LogicalName) {
+                            const tableName = params[key].attributes.LogicalName;
+                            console.log('Table name found via context parameters:', tableName);
+                            return tableName;
+                        }
+                    }
+                }
+            } catch (e) {
+                console.debug('Could not extract table name from parameters:', e);
+            }
+            
+            // Method 5: Try global context (if available)
+            interface XrmPage {
+                data?: {
+                    entity?: {
+                        getEntityName(): string;
+                    };
+                };
+            }
+            interface WindowWithXrm extends Window {
+                Xrm?: {
+                    Page?: XrmPage;
+                };
+            }
+            
+            if (typeof window !== 'undefined') {
+                const windowWithXrm = window as WindowWithXrm;
+                if (windowWithXrm.Xrm && windowWithXrm.Xrm.Page && windowWithXrm.Xrm.Page.data && windowWithXrm.Xrm.Page.data.entity) {
+                    const entityName = windowWithXrm.Xrm.Page.data.entity.getEntityName();
+                    if (entityName) {
+                        console.log('Table name found via Xrm.Page.data.entity:', entityName);
+                        return entityName;
+                    }
+                }
+            }
+            
+            console.warn('Could not determine table name from any method, using fallback');
+            return 'unknown_table';
+        } catch (error) {
+            console.warn('Could not determine table name:', error);
+            return 'unknown_table';
+        }
+    }
+
+    /**
+     * Check if the component is in read-only mode
+     */
+    private checkReadOnlyState(context: ComponentFramework.Context<IInputs>): boolean {
+        try {
+            // Method 1: Check if the control is disabled via context mode
+            if (context.mode.isControlDisabled) {
+                return true;
+            }
+
+            // Method 2: Check if the keyDataField has security restrictions
+            if (context.parameters.keyDataField) {
+                const keyDataFieldParameter = context.parameters.keyDataField as ComponentFramework.PropertyTypes.Property & {
+                    security?: {
+                        editable?: boolean;
+                        readable?: boolean;
+                    };
+                };
+                
+                if (keyDataFieldParameter.security) {
+                    // Check if the field is read-only or user doesn't have update permission
+                    if (!keyDataFieldParameter.security.editable || keyDataFieldParameter.security.readable === false) {
+                        return true;
+                    }
+                }
+            }
+
+            // Method 3: Check if the form/page is in read-only mode
+            if (context.mode.isVisible === false) {
+                return true;
+            }
+
+            // Method 4: Check if running in Power Apps that might have form-level readonly restrictions
+            if (typeof window !== 'undefined' && window.location) {
+                const url = window.location.href.toLowerCase();
+                // Check for readonly indicators in URL or form mode
+                if (url.includes('readonly=true') || url.includes('formmode=readonly') || url.includes('mode=readonly')) {
+                    return true;
+                }
+            }
+
+            // Method 5: Check context properties for any readonly indicators
+            const contextMode = context.mode as ComponentFramework.Mode & { 
+                contextInfo?: { 
+                    isReadOnly?: boolean;
+                    formFactor?: string;
+                };
+            };
+            
+            if (contextMode.contextInfo && contextMode.contextInfo.isReadOnly) {
+                return true;
+            }
+
+            return false;
+
+        } catch (error) {
+            console.warn('Could not determine read-only state:', error);
+            // Default to false (allow editing) if unable to determine
+            return false;
+        }
+    }
+
+    /**
+     * Gets the environment base URL
+     */
+    private getEnvironmentBaseUrl(): string {
+        try {
+            // Fallback: extract from current window location
+            if (typeof window !== 'undefined' && window.location) {
+                const { protocol, hostname } = window.location;
+                return `${protocol}//${hostname}`;
+            }
+            
+            // Default fallback
+            return 'https://wecare-ii.crm5.dynamics.com';
+        } catch (error) {
+            console.warn('Could not determine base URL, using default:', error);
+            return 'https://wecare-ii.crm5.dynamics.com';
+        }
+    }
+
+    /**
+     * Convert File to base64 string
+     */
+    private fileToBase64(file: File): Promise<string> {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+        });
+    }
+
+    /**
+     * Add save all button functionality
+     */
+    private async saveAllImages(): Promise<void> {
+        // Check if component is in readonly mode
+        if (this._isReadOnly) {
+            this.updateStatus('Không thể lưu hình ảnh trong chế độ chỉ đọc', 'error');
+            return;
+        }
+
+        if (this._selectedImages.length === 0) {
+            this.updateStatus('Không có hình ảnh mới để lưu', 'info');
+            return;
+        }
+
+        this.updateStatus(`Đang lưu ${this._selectedImages.length} hình ảnh...`, 'info');
+
+        try {
+            // Save all images sequentially
+            const imagesToSave = [...this._selectedImages]; // Create a copy to avoid array mutation issues
+            
+            for (let i = 0; i < imagesToSave.length; i++) {
+                const file = imagesToSave[i];
+                const note = this.getImageNote(i);
+                const fileName = file.name || `Image_${Date.now()}_${i}.${this.getImageExtension(file.type)}`;
+
+                // Convert image to base64
+                const base64String = await this.fileToBase64(file);
+
+                // Create record in crdfd_multiimages
+                const record = {
+                    crdfd_image_name: fileName,
+                    crdfd_notes: note,
+                    crdfd_key_data: this._keyDataValue,
+                    crdfd_table: this._tableName,
+                    crdfd_image: base64String.split(',')[1] // Remove data:image prefix
+                };
+
+                await this._context.webAPI.createRecord("crdfd_multiimages", record);
+                
+                this.updateStatus(`Đã lưu ${i + 1}/${imagesToSave.length} hình ảnh...`, 'info');
+            }
+
+            // Clear selected images and notes after successful save
+            this._selectedImages = [];
+            this._imageNotes = [];
+
+            // Reload existing images
+            await this.loadExistingImages();
+
+            this.updateStatus(`Đã lưu thành công ${imagesToSave.length} hình ảnh`, 'success');
+
+        } catch (error) {
+            console.error("Error saving all images:", error);
+            this.updateStatus('Lỗi khi lưu hình ảnh', 'error');
+        }
+    }
+}
