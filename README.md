@@ -1,200 +1,289 @@
-# Import Images PCF Control
+# PCF Import Images Control - Hướng dẫn đầy đủ
 
-Đây là một PCF (PowerApps Component Framework) control cho phép import nhiều hình ảnh trong Canvas App với preview và quản lý.
+## 🚀 Cài đặt nhanh
 
-## Tính năng
+```bash
+# 1. Clone và cài đặt
+git clone <repository-url>
+cd PCF-ImportImage-Wecare
+npm install
 
-- ✅ **Upload nhiều hình ảnh** từ file explorer
-- ✅ **Drag & Drop interface** để chọn nhiều file
-- ✅ **Paste hình ảnh từ clipboard (Ctrl+V)**
-- ✅ **Preview grid** hiển thị tất cả hình ảnh đã chọn
-- ✅ **Ghi chú cho từng hình**: Textarea để nhập ghi chú cho mỗi hình ảnh
-- ✅ **Quản lý hình ảnh**: Xóa từng hình hoặc xóa tất cả
-- ✅ **Hỗ trợ định dạng**: PNG, JPG, JPEG, GIF, BMP, WEBP
-- ✅ **Tự động đặt tên** file cho hình paste
-- ✅ **Output JSON array** chứa tất cả hình ảnh kèm ghi chú để Canvas App sử dụng
-- ✅ **Responsive design** hoạt động trên desktop và mobile
+# 2. Build và test local
+npm run build
+npm start watch
 
-## Cách sử dụng
+# 3. Deploy lên môi trường
+pac pcf push --publisher-prefix crdfd
+```
 
-### 1. Build và Deploy PCF Control
+## 📖 Tổng quan
+
+**Import Images PCF Control** là component cho Power Platform cho phép upload và quản lý nhiều hình ảnh trong Canvas App với giao diện trực quan và dễ sử dụng.
+
+### ✨ Tính năng chính
+
+| Tính năng | Mô tả |
+|-----------|--------|
+| 🔄 **Multi-upload** | Upload nhiều hình cùng lúc từ file explorer |
+| 🎯 **Drag & Drop** | Kéo thả trực tiếp nhiều file vào control |
+| 📋 **Paste Support** | Paste hình từ clipboard (Ctrl+V) |
+| 🖼️ **Live Preview** | Xem trước tất cả hình trong grid layout |
+| 📝 **Ghi chú** | Thêm ghi chú cho từng hình ảnh |
+| 🗑️ **Quản lý** | Xóa từng hình hoặc xóa tất cả |
+| 🎨 **Responsive** | Hoạt động tốt trên mọi thiết bị |
+
+### 📋 Định dạng hỗ trợ
+**PNG, JPG, JPEG, GIF, BMP, WEBP**
+
+## 🛠️ Hướng dẫn triển khai
+
+### Bước 1: Build PCF Control
 
 ```bash
 # Build control
 npm run build
 
-# Tạo solution package
-pac solution init --publisher-name "YourPublisher" --publisher-prefix "prefix"
+# Tạo solution
+pac solution init --publisher-name "WecarePublisher" --publisher-prefix "wec"
 pac solution add-reference --path .
-pac solution pack --folder "SolutionFolder" --zipfile "ImportFileControl.zip"
-
-# Import vào Power Platform environment
-pac solution import --path "ImportFileControl.zip"
+pac solution pack --folder "Solution" --zipfile "ImportImagesControl.zip"
 ```
 
-### 2. Sử dụng trong Canvas App
+### Bước 2: Import vào Power Platform
 
-1. Thêm control vào Canvas App:
-   - Chọn "Insert" > "Custom" > "Import components"
-   - Chọn "ImportFile" control
+```bash
+# Import solution
+pac solution import --path "ImportImagesControl.zip"
+```
 
-2. Bind các output properties:
-   - `fileName`: Tên file đầu tiên (backward compatibility)
-   - `fileContent`: Nội dung file đầu tiên dưới dạng base64 (backward compatibility)  
-   - `uploadStatus`: Trạng thái (ready khi có ảnh)
-   - `imagesList`: JSON array chứa tất cả hình ảnh
-   - `imagesCount`: Số lượng hình ảnh đã chọn
+### Bước 3: Thêm vào Canvas App
 
-### 3. Xử lý kết quả - Nhiều hình ảnh
+1. **Insert → Custom → Import components**
+2. Chọn **"ImportImages"** control
+3. Kéo control vào canvas
+
+## 💻 Sử dụng trong Canvas App
+
+### Properties và Output
+
+| Property | Type | Mô tả |
+|----------|------|--------|
+| `imagesList` | JSON Array | Danh sách tất cả hình ảnh |
+| `imagesCount` | Number | Số lượng hình đã chọn |
+| `uploadStatus` | Text | Trạng thái: "ready" khi có hình |
+| `fileName` | Text | Tên file đầu tiên (legacy) |
+| `fileContent` | Text | Base64 của file đầu tiên (legacy) |
+
+### Xử lý dữ liệu - Multiple Images
 
 ```powerFx
-// Parse danh sách hình ảnh
-Set(ImagesCollection, 
+// 1. Parse danh sách hình ảnh
+Set(ImagesData, 
     ForAll(
         ParseJSON(ImportImagesControl.imagesList),
         {
-            Name: Text(ThisRecord.name),
-            Content: Text(ThisRecord.content),
-            Size: Value(Text(ThisRecord.size)),
-            Type: Text(ThisRecord.type)
+            FileName: Text(ThisRecord.name),
+            FileContent: Text(ThisRecord.content),
+            FileSize: Value(Text(ThisRecord.size)),
+            ContentType: Text(ThisRecord.type),
+            UserNote: Text(ThisRecord.note),
+            ImageIndex: Value(Text(ThisRecord.index))
         }
     )
 );
 
-// Kiểm tra số lượng hình
+// 2. Hiển thị thông báo
 If(ImportImagesControl.imagesCount > 0,
-    Notify($"Đã chọn {ImportImagesControl.imagesCount} hình ảnh", NotificationType.Success)
+    Notify($"✅ Đã chọn {ImportImagesControl.imagesCount} hình ảnh", NotificationType.Success),
+    Notify("⚠️ Chưa chọn hình ảnh nào", NotificationType.Warning)
 );
 
-// Lưu tất cả hình vào Dataverse
-ForAll(ImagesCollection,
-    Patch('Image Gallery',
-        Defaults('Image Gallery'),
+// 3. Lưu vào Dataverse/SharePoint
+ForAll(ImagesData,
+    Patch('Images Library',
+        Defaults('Images Library'),
         {
-            'Image Name': Name,
-            'Image Content': Content,
-            'File Size': Size,
-            'Content Type': Type,
-            'Upload Date': Now()
+            Title: FileName,
+            ImageContent: FileContent,
+            FileSize: FileSize,
+            ContentType: ContentType,
+            Notes: UserNote,
+            UploadDate: Now(),
+            UploadedBy: User().FullName
         }
     )
 );
 ```
 
-### 4. Xử lý từng hình riêng lẻ
+### Hiển thị trong Gallery
 
 ```powerFx
-// Hiển thị trong Gallery control
-// Gallery Items property:
+// Gallery Items property
 ParseJSON(ImportImagesControl.imagesList)
 
-// Trong Gallery, Image control:
-"data:image/" & 
-Right(Text(ThisItem.type), Len(Text(ThisItem.type)) - Find("/", Text(ThisItem.type))) & 
-";base64," & Text(ThisItem.content)
+// Image control trong Gallery
+"data:" & Text(ThisItem.type) & ";base64," & Text(ThisItem.content)
+
+// Label hiển thị tên file
+Text(ThisItem.name)
+
+// Label hiển thị ghi chú
+Text(ThisItem.note)
 ```
 
-## Cấu trúc dữ liệu Output
+## 📊 Cấu trúc dữ liệu
 
-### imagesList (JSON Array)
+### JSON Output Format
+
 ```json
 [
   {
-    "name": "image1.jpg",
-    "content": "base64_encoded_content",
-    "size": 12345,
+    "name": "product-image.jpg",
+    "content": "iVBORw0KGgoAAAANSUhEUgAAA...",
+    "size": 156789,
     "type": "image/jpeg",
     "index": 0,
-    "note": "Hình ảnh sản phẩm mới"
+    "note": "Hình ảnh sản phẩm chính"
   },
   {
-    "name": "Pasted_Image_1641234567890.png", 
-    "content": "base64_encoded_content",
-    "size": 67890,
-    "type": "image/png",
+    "name": "Pasted_Image_1641234567890.png",
+    "content": "iVBORw0KGgoAAAANSUhEUgAAA...",
+    "size": 89012,
+    "type": "image/png", 
     "index": 1,
-    "note": "Screenshot từ meeting"
+    "note": "Screenshot từ meeting với khách hàng"
   }
 ]
 ```
 
-### Backward Compatibility
-- `fileName`: Tên của hình đầu tiên
-- `fileContent`: Base64 content của hình đầu tiên  
-- `uploadStatus`: "ready" khi có hình ảnh
+## 🎯 Best Practices
 
-## Các định dạng được hỗ trợ
+### 1. Performance Optimization
 
-- **Image formats**: PNG, JPG, JPEG, GIF, BMP, WEBP
-- **Paste support**: Tất cả format image từ clipboard
-
-## Cách sử dụng
-
-### Upload Multiple Images
-1. **Click để chọn nhiều file**: Giữ Ctrl và click để chọn nhiều hình
-2. **Drag & Drop**: Kéo thả nhiều file hình ảnh cùng lúc  
-3. **Paste từ clipboard**: Copy hình từ bất kỳ đâu và Ctrl+V
-
-### Quản lý hình ảnh
-1. **Preview**: Tất cả hình sẽ hiển thị trong grid với thumbnail
-2. **Xóa từng hình**: Click nút "×" trên mỗi hình
-3. **Xóa tất cả**: Click nút "Xóa tất cả" 
-4. **Thông tin chi tiết**: Tên file và dung lượng hiển thị dưới mỗi hình
-5. **Ghi chú**: Textarea để nhập ghi chú cho từng hình ảnh
-
-### Tích hợp Canvas App
-1. Control tự động update `imagesCount` và `imagesList` 
-2. Parse JSON để lấy thông tin từng hình
-3. Sử dụng base64 content để hiển thị hoặc lưu trữ
-
-## Customization
-
-Bạn có thể tùy chỉnh:
-- CSS trong file `css/ImportFile.css`
-- Logic upload trong method `uploadToDataverse()`
-- Các định dạng file được hỗ trợ trong method `getMimeType()`
-
-## Troubleshooting
-
-### Lỗi build
-- Đảm bảo đã cài đặt PCF CLI: `npm install -g @microsoft/powerapps-cli`
-- Kiểm tra Node.js version compatibility
-
-### Lỗi upload
-- Kiểm tra quyền WebAPI trong environment
-- Đảm bảo entity `annotation` có thể truy cập được
-- Kiểm tra file size limit
-
-### Lỗi deployment
-- Đảm bảo solution publisher name và prefix hợp lệ
-- Kiểm tra quyền deploy trong Power Platform environment
-
-## Development
-
-```bash
-# Install dependencies
-npm install
-
-# Start development server
-npm start
-
-# Build for production
-npm run build
-
-# Run linting
-npm run lint
-
-# Fix linting issues
-npm run lint:fix
+```powerFx
+// Chỉ process khi có thay đổi
+If(ImportImagesControl.imagesCount <> PreviousCount,
+    Set(PreviousCount, ImportImagesControl.imagesCount);
+    Set(ImagesData, ParseJSON(ImportImagesControl.imagesList))
+);
 ```
 
-## Compatibility
+### 2. Error Handling
 
-- Power Platform PCF Framework 1.0+
-- Canvas Apps
-- Model-driven Apps
-- Power Pages (với một số hạn chế)
+```powerFx
+// Kiểm tra và xử lý lỗi
+If(IsError(ParseJSON(ImportImagesControl.imagesList)),
+    Notify("❌ Lỗi xử lý dữ liệu hình ảnh", NotificationType.Error),
+    // Process normal
+    Set(ImagesData, ParseJSON(ImportImagesControl.imagesList))
+);
+```
 
-## License
+### 3. File Size Validation
 
-MIT License
+```powerFx
+// Lọc file quá lớn (> 5MB)
+Set(ValidImages, 
+    Filter(ImagesData, FileSize <= 5242880)
+);
+
+Set(InvalidImages,
+    Filter(ImagesData, FileSize > 5242880)
+);
+
+If(CountRows(InvalidImages) > 0,
+    Notify($"⚠️ {CountRows(InvalidImages)} file vượt quá 5MB", NotificationType.Warning)
+);
+```
+
+## 🔧 Customization
+
+### CSS Styling
+Chỉnh sửa `css/ImportFile.css`:
+
+```css
+/* Custom preview grid */
+.preview-grid {
+    gap: 15px;
+    padding: 20px;
+}
+
+/* Custom upload area */
+.upload-area {
+    border: 2px dashed #007acc;
+    border-radius: 10px;
+}
+```
+
+### Supported File Types
+Chỉnh sửa trong `getMimeType()` method để thêm format mới.
+
+## 🐛 Troubleshooting
+
+### Build Issues
+```bash
+# Kiểm tra PCF CLI version
+pac --version
+
+# Reinstall dependencies
+rm -rf node_modules package-lock.json
+npm install
+
+# Clear build cache
+npm run build -- --clean
+```
+
+### Runtime Issues
+
+| Lỗi | Nguyên nhân | Giải pháp |
+|-----|-------------|-----------|
+| "JSON parse error" | Dữ liệu không hợp lệ | Kiểm tra `imagesList` property |
+| "Upload failed" | Quyền truy cập | Kiểm tra permissions trong environment |
+| "File too large" | Vượt quá giới hạn | Giảm kích thước file hoặc tăng limit |
+
+### Environment Setup
+```bash
+# Kiểm tra environment connection
+pac org list
+
+# Switch environment nếu cần
+pac org select --environment [environment-id]
+
+# Verify PCF control
+pac pcf list
+```
+
+## 📱 Mobile Compatibility
+
+Control hoạt động tốt trên mobile với:
+- Touch-friendly interface
+- Responsive grid layout  
+- Camera integration (qua file input)
+- Optimized for touch gestures
+
+## 🔄 Development Workflow
+
+```bash
+# Development mode
+npm start watch
+
+# Testing
+npm run test
+
+# Code quality
+npm run lint
+npm run lint:fix
+
+# Production build
+npm run build --production
+```
+
+## 📄 License & Support
+
+- **License**: MIT
+- **Support**: Tạo issue trong repository
+- **Compatibility**: PCF Framework 1.0+, Canvas Apps, Model-driven Apps
+
+---
+
+> 💡 **Tip**: Sử dụng browser dev tools để debug và monitor performance khi phát triển với control này.
