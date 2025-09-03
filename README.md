@@ -12,6 +12,9 @@ npm install
 npm run build
 npm start watch
 
+# 3. Cập nhật version number
+File ControlManifest.Input.xml và package.json
+
 # 3. Deploy lên môi trường
 pac pcf push --publisher-prefix crdfd
 ```
