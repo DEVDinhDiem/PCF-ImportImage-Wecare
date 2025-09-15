@@ -643,7 +643,10 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             // Delete all existing images from Dataverse
             if (hasExistingImages) {
                 for (const image of this._existingImages) {
-                    await this._context.webAPI.deleteRecord("crdfd_multiimages", image.crdfd_multiimagesid);
+                    await this._context.webAPI.updateRecord("crdfd_multiimages", image.crdfd_multiimagesid, {
+                        statecode: 1, // Deactivate
+                        // statuscode: 2 // Inactive
+                    });
                 }
             }
 
@@ -790,7 +793,7 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             // Query crdfd_multiimages table with table name filter
             let query = `?$filter=crdfd_key_data eq '${this._keyDataValue}'`;
             if (this._tableName && this._tableName !== 'unknown_table') {
-                query += ` and crdfd_table eq '${this._tableName}'`;
+                query += ` and crdfd_table eq '${this._tableName}' and statecode eq 0`; // Active records only
             }
             query += `&$select=crdfd_multiimagesid,crdfd_image_name,crdfd_notes,crdfd_image,crdfd_table`;
             
@@ -994,7 +997,7 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
         try {
             // For Dataverse images, we might need to use the File API or make a specific call
             // This is a placeholder - actual implementation depends on how images are stored
-            const response = await this._context.webAPI.retrieveRecord("crdfd_multiimages", imageId, "?$select=crdfd_image");
+            const response = await this._context.webAPI.retrieveRecord("crdfd_multiimages", imageId, "?$select=crdfd_image&$filter=statecode eq 0");
             if (response.crdfd_image) {
                 imgElement.src = `data:image/png;base64,${response.crdfd_image}`;
             }
@@ -1064,7 +1067,10 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
         try {
             this.updateStatus('Đang xóa hình ảnh...', 'info');
 
-            await this._context.webAPI.deleteRecord("crdfd_multiimages", imageId);
+            await this._context.webAPI.updateRecord("crdfd_multiimages", imageId, {
+                        statecode: 1, // Deactivate
+                        // statuscode: 2 // Inactive
+                    });
 
             // Remove from existing images array
             this._existingImages.splice(index, 1);
@@ -1218,7 +1224,7 @@ export class ImportImage implements ComponentFramework.StandardControl<IInputs, 
             this.updateStatus('Đang chuẩn bị hiển thị ảnh...', 'info');
             
             // Get only the image name for the modal title
-            const response = await this._context.webAPI.retrieveRecord("crdfd_multiimages", imageId, "?$select=crdfd_image_name,crdfd_image");
+            const response = await this._context.webAPI.retrieveRecord("crdfd_multiimages", imageId, "?$select=crdfd_image_name,crdfd_image&$filter=statecode eq 0");
             
             // Construct the full size image URL for display and download
             const baseUrl = this.getEnvironmentBaseUrl();
